@@ -185,17 +185,23 @@ int main() {
 Simply mark your structs with an attribute - no macros, no manual field listing:
 
 ```cpp
-// game_types.hpp
-struct [[memglass::observe]] Vec3 {
-    float x, y, z;
+// trading_types.hpp
+struct [[memglass::observe]] Quote {
+    int64_t bid_price;      // Price in ticks (fixed-point)
+    int64_t ask_price;
+    uint32_t bid_size;
+    uint32_t ask_size;
+    uint64_t timestamp_ns;
 };
 
-struct [[memglass::observe]] Player {
-    uint32_t id;
-    Vec3 position;
-    Vec3 velocity;
-    float health;
-    bool is_active;
+struct [[memglass::observe]] Order {
+    uint64_t order_id;
+    uint32_t symbol_id;
+    int64_t price;
+    uint32_t quantity;
+    uint32_t filled_qty;
+    int8_t side;            // 1=Buy, -1=Sell
+    int8_t status;          // 0=Pending, 1=Open, 2=Filled, 3=Cancelled
 };
 ```
 
@@ -203,7 +209,7 @@ The `memglass-gen` tool (a clang-based code generator) parses your headers and a
 
 ```bash
 # Run at build time (integrated into CMake)
-memglass-gen --output=memglass_generated.hpp include/game_types.hpp
+memglass-gen --output=memglass_generated.hpp include/trading_types.hpp
 ```
 
 This generates type descriptors with full field information extracted from clang's AST:
@@ -212,33 +218,37 @@ This generates type descriptors with full field information extracted from clang
 // memglass_generated.hpp (auto-generated, do not edit)
 namespace memglass::generated {
 
-template<> struct TypeDescriptor<Vec3> {
-    static constexpr std::string_view name = "Vec3";
-    static constexpr size_t size = 12;
-    static constexpr size_t alignment = 4;
-    static constexpr std::array<FieldInfo, 3> fields = {{
-        {"x", offsetof(Vec3, x), sizeof(float), PrimitiveType::Float32, 0},
-        {"y", offsetof(Vec3, y), sizeof(float), PrimitiveType::Float32, 0},
-        {"z", offsetof(Vec3, z), sizeof(float), PrimitiveType::Float32, 0},
+template<> struct TypeDescriptor<Quote> {
+    static constexpr std::string_view name = "Quote";
+    static constexpr size_t size = 32;
+    static constexpr size_t alignment = 8;
+    static constexpr std::array<FieldInfo, 5> fields = {{
+        {"bid_price", offsetof(Quote, bid_price), sizeof(int64_t), PrimitiveType::Int64, 0},
+        {"ask_price", offsetof(Quote, ask_price), sizeof(int64_t), PrimitiveType::Int64, 0},
+        {"bid_size", offsetof(Quote, bid_size), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"ask_size", offsetof(Quote, ask_size), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"timestamp_ns", offsetof(Quote, timestamp_ns), sizeof(uint64_t), PrimitiveType::UInt64, 0},
     }};
 };
 
-template<> struct TypeDescriptor<Player> {
-    static constexpr std::string_view name = "Player";
-    static constexpr size_t size = 28;
-    static constexpr size_t alignment = 4;
-    static constexpr std::array<FieldInfo, 5> fields = {{
-        {"id", offsetof(Player, id), sizeof(uint32_t), PrimitiveType::UInt32, 0},
-        {"position", offsetof(Player, position), sizeof(Vec3), TypeId<Vec3>, 0},
-        {"velocity", offsetof(Player, velocity), sizeof(Vec3), TypeId<Vec3>, 0},
-        {"health", offsetof(Player, health), sizeof(float), PrimitiveType::Float32, 0},
-        {"is_active", offsetof(Player, is_active), sizeof(bool), PrimitiveType::Bool, 0},
+template<> struct TypeDescriptor<Order> {
+    static constexpr std::string_view name = "Order";
+    static constexpr size_t size = 32;
+    static constexpr size_t alignment = 8;
+    static constexpr std::array<FieldInfo, 7> fields = {{
+        {"order_id", offsetof(Order, order_id), sizeof(uint64_t), PrimitiveType::UInt64, 0},
+        {"symbol_id", offsetof(Order, symbol_id), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"price", offsetof(Order, price), sizeof(int64_t), PrimitiveType::Int64, 0},
+        {"quantity", offsetof(Order, quantity), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"filled_qty", offsetof(Order, filled_qty), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"side", offsetof(Order, side), sizeof(int8_t), PrimitiveType::Int8, 0},
+        {"status", offsetof(Order, status), sizeof(int8_t), PrimitiveType::Int8, 0},
     }};
 };
 
 inline void register_all_types() {
-    memglass::registry::add<Vec3>();
-    memglass::registry::add<Player>();
+    memglass::registry::add<Quote>();
+    memglass::registry::add<Order>();
 }
 
 } // namespace memglass::generated
@@ -248,30 +258,30 @@ inline void register_all_types() {
 
 ```cpp
 // Allocate in memglass-managed shared memory
-Player* player = memglass::create<Player>("player_1");
+Order* order = memglass::create<Order>("order_12345");
 
 // Construct with arguments
-Player* player = memglass::create<Player>("player_2",
-    Player{.id = 42, .position = {0,0,0}, .health = 100.0f});
+Order* order = memglass::create<Order>("order_67890",
+    Order{.order_id = 67890, .symbol_id = 1, .price = 15025, .quantity = 100, .side = 1});
 
-// Array allocation
-Player* players = memglass::create_array<Player>("all_players", 100);
+// Array allocation for order book levels
+Quote* quotes = memglass::create_array<Quote>("AAPL_quotes", 10);
 
 // Destruction (marks as destroyed, memory reclaimed later)
-memglass::destroy(player);
+memglass::destroy(order);
 ```
 
 ### Manual Memory Management (Advanced)
 
 ```cpp
 // Get raw allocator for custom containers
-memglass::Allocator<Player> alloc;
-std::vector<Player, memglass::Allocator<Player>> players(alloc);
+memglass::Allocator<Order> alloc;
+std::vector<Order, memglass::Allocator<Order>> orders(alloc);
 
 // Placement new in memglass memory
-void* mem = memglass::allocate(sizeof(Player), alignof(Player));
-Player* p = new (mem) Player{};
-memglass::register_object(p, "manual_player");
+void* mem = memglass::allocate(sizeof(Order), alignof(Order));
+Order* o = new (mem) Order{};
+memglass::register_object(o, "manual_order");
 ```
 
 ## Observer API
@@ -283,7 +293,7 @@ memglass::register_object(p, "manual_player");
 
 int main() {
     // Connect to running session
-    memglass::Observer observer("my_application");
+    memglass::Observer observer("trading_engine");
 
     if (!observer.connect()) {
         std::cerr << "Failed to connect\n";
@@ -312,60 +322,138 @@ int main() {
     }
 ```
 
-### Reading Object State
+### Reading and Writing Field Values
+
+The observer uses an intuitive `operator[]` syntax. Atomicity is handled automatically based on field metadata.
 
 ```cpp
-    // Find object by label
-    auto player_view = observer.find("player_1");
-    if (player_view) {
-        // Read fields by name
-        float health = player_view.read<float>("health");
-        bool active = player_view.read<bool>("is_active");
+    auto order = observer.find("order_12345");
+    if (order) {
+        // Read fields - type inferred from registry, atomicity automatic
+        int64_t price = order["price"];
+        int8_t status = order["status"];
 
-        // Read nested struct
-        auto pos = player_view.field("position");
-        float x = pos.read<float>("x");
+        // Write fields - atomicity automatic
+        order["filled_qty"] = 50;
+        order["status"] = 2;  // Filled
 
-        // Read entire object (copies to local memory)
-        Player local_copy = player_view.read_as<Player>();
+        // Nested fields via chaining
+        int64_t bid = order["last_quote"]["bid_price"];
+        order["last_quote"]["bid_price"] = 15025;
 
-        // Raw memory access
-        const void* raw = player_view.data();
+        // Or dot notation (equivalent)
+        int64_t ask = order["last_quote.ask_price"];
+        order["last_quote.ask_size"] = 100;
+
+        // Array access (order book levels)
+        int64_t best_bid = order["bid_levels"][0];
+        order["ask_levels"][2] = 15030;
+
+        // Read entire struct (copies to local memory)
+        Quote quote = order["last_quote"].as<Quote>();
+        Order local_copy = order.as<Order>();
+
+        // Write entire struct
+        order["last_quote"] = Quote{.bid_price=15020, .ask_price=15025, .bid_size=100, .ask_size=200};
     }
 ```
 
-### Writing Object State
+### FieldProxy Implementation
 
-The observer can also write values back to shared memory:
+The `operator[]` returns a `FieldProxy` that handles reads/writes:
 
 ```cpp
-    auto player_view = observer.find("player_1");
-    if (player_view) {
-        // Write individual fields
-        player_view.write<float>("health", 100.0f);
-        player_view.write<bool>("is_active", true);
+class FieldProxy {
+    ObjectView& obj_;
+    std::string path_;
+    const FieldInfo& info_;
 
-        // Write nested field using dot notation
-        player_view.write<float>("position.x", 10.0f);
-
-        // Write entire nested struct
-        Vec3 new_pos{1.0f, 2.0f, 3.0f};
-        player_view.write("position", new_pos);
-
-        // Write to array element
-        player_view.write<float>("scores[0]", 150.0f);
-
-        // Mutable raw pointer (use with caution)
-        void* raw = player_view.mutable_data();
+public:
+    // Implicit conversion for reads (type from registry)
+    template<typename T>
+    operator T() const {
+        // Dispatch based on atomicity annotation
+        switch (info_.atomicity) {
+            case Atomicity::None:    return read_direct<T>();
+            case Atomicity::Atomic:  return read_atomic<T>();
+            case Atomicity::Seqlock: return read_seqlock<T>();
+            case Atomicity::Locked:  return read_locked<T>();
+        }
     }
+
+    // Assignment for writes
+    template<typename T>
+    FieldProxy& operator=(const T& value) {
+        switch (info_.atomicity) {
+            case Atomicity::None:    write_direct(value); break;
+            case Atomicity::Atomic:  write_atomic(value); break;
+            case Atomicity::Seqlock: write_seqlock(value); break;
+            case Atomicity::Locked:  write_locked(value); break;
+        }
+        return *this;
+    }
+
+    // Chaining for nested access
+    FieldProxy operator[](std::string_view name) const {
+        return obj_.field(path_ + "." + std::string(name));
+    }
+
+    FieldProxy operator[](size_t index) const {
+        return obj_.field(path_ + "[" + std::to_string(index) + "]");
+    }
+
+    // Explicit type conversion when needed
+    template<typename T>
+    T as() const { return static_cast<T>(*this); }
+};
 ```
 
-**Write Safety:**
+### Path Syntax Reference
 
-- Writes are not atomic for multi-byte types by default
-- Use `std::atomic<T>` fields or `Guarded<T>` for safe concurrent modification
-- Observer writes while producer is also writing may cause data races
-- Consider producer-side locking if bidirectional modification is required
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| `field` | `order["price"]` | Direct field access |
+| `field.nested` | `order["last_quote.bid_price"]` | Nested field (dot notation) |
+| `field[i]` | `order["bid_levels"][0]` | Array element |
+| `field[i].nested` | `order["fills"][0]["price"]` | Array of structs |
+| Chained | `order["last_quote"]["bid_price"]` | Equivalent to dot notation |
+
+### Advanced: Explicit Atomicity Control
+
+For special cases where you need to override the default behavior:
+
+```cpp
+    // Force non-atomic read (for debugging, slightly faster)
+    int64_t qty = position["quantity"].unsafe();
+
+    // Force atomic even if not annotated
+    int64_t qty = position["quantity"].atomic();
+
+    // Try-read for seqlock (non-blocking, returns nullopt if write in progress)
+    auto quote = position["last_quote"].try_get<Quote>();
+    if (quote) {
+        // Got consistent value
+    }
+
+    // Read-modify-write for locked fields
+    position["error_msg"].update([](char* buf) {
+        std::strcat(buf, " (retry)");
+    });
+```
+
+### Raw Access (Advanced)
+
+```cpp
+    // Raw pointer access (bypasses atomicity)
+    const void* raw = order.data();
+    void* mutable_raw = order.mutable_data();  // Use with caution
+
+    // Field info for reflection
+    FieldInfo info = order["price"].info();
+    std::cout << "Type: " << info.type_name
+              << ", Offset: " << info.offset
+              << ", Atomicity: " << info.atomicity << "\n";
+```
 
 ### Watching for Changes
 
@@ -380,9 +468,9 @@ The observer can also write values back to shared memory:
         }
 
         // Read current values
-        auto player = observer.find("player_1");
-        if (player) {
-            std::cout << "Health: " << player.read<float>("health") << "\n";
+        auto position = observer.find("AAPL_position");
+        if (position) {
+            std::cout << "Quantity: " << position["quantity"] << "\n";
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -421,12 +509,12 @@ memglass provides multiple levels of consistency for field access:
 Use the `@atomic` annotation to specify consistency requirements:
 
 ```cpp
-struct [[memglass::observe]] Player {
-    uint32_t id;                      // No consistency (default)
-    float health;                     // @atomic - use std::atomic internally
-    Vec3 position;                    // @seqlock - wrap in Guarded<T>
-    char name[32];                    // @locked - mutex-protected
-    uint64_t frame_counter;           // @atomic
+struct [[memglass::observe]] Position {
+    uint32_t symbol_id;               // No consistency (default)
+    int64_t quantity;                 // @atomic - use std::atomic internally
+    Quote last_quote;                 // @seqlock - wrap in Guarded<T>
+    char error_msg[256];              // @locked - mutex-protected
+    uint64_t update_count;            // @atomic
 };
 ```
 
@@ -434,12 +522,12 @@ The generator produces appropriate wrappers:
 
 ```cpp
 // memglass_generated.hpp
-struct Player_Storage {
-    uint32_t id;                      // Direct storage
-    std::atomic<float> health;        // Atomic wrapper
-    memglass::Guarded<Vec3> position; // Seqlock wrapper
-    memglass::Locked<char[32]> name;  // Mutex wrapper
-    std::atomic<uint64_t> frame_counter;
+struct Position_Storage {
+    uint32_t symbol_id;               // Direct storage
+    std::atomic<int64_t> quantity;    // Atomic wrapper
+    memglass::Guarded<Quote> last_quote;  // Seqlock wrapper
+    memglass::Locked<char[256]> error_msg;  // Mutex wrapper
+    std::atomic<uint64_t> update_count;
 };
 ```
 
@@ -448,17 +536,17 @@ struct Player_Storage {
 For single primitive values that fit in a register:
 
 ```cpp
-struct [[memglass::observe]] Counter {
-    uint64_t value;  // @atomic
+struct [[memglass::observe]] OrderStats {
+    uint64_t order_count;  // @atomic
 };
 
 // Producer
-counter->value.store(42, std::memory_order_release);
-counter->value.fetch_add(1, std::memory_order_relaxed);
+stats->order_count.store(42, std::memory_order_release);
+stats->order_count.fetch_add(1, std::memory_order_relaxed);
 
 // Observer
-uint64_t v = counter_view.read_atomic<uint64_t>("value");
-counter_view.write_atomic<uint64_t>("value", 100);
+uint64_t count = stats_view["order_count"];  // automatic atomic read
+stats_view["order_count"] = 100;             // automatic atomic write
 ```
 
 **Supported atomic types:** `bool`, `int8-64`, `uint8-64`, `float`, `double` (if lock-free on platform)
@@ -521,18 +609,18 @@ struct Guarded {
 **Usage in struct:**
 
 ```cpp
-struct [[memglass::observe]] Transform {
-    memglass::Guarded<Vec3> position;   // Or use: // @seqlock
-    memglass::Guarded<Vec3> rotation;
-    memglass::Guarded<Vec3> scale;
+struct [[memglass::observe]] MarketData {
+    memglass::Guarded<Quote> best_quote;     // Or use: // @seqlock
+    memglass::Guarded<Quote> last_trade;
+    memglass::Guarded<OHLC> daily_bar;
 };
 
 // Producer
-transform->position.write({1.0f, 2.0f, 3.0f});
+market_data->best_quote.write({.bid_price=15020, .ask_price=15025, .bid_size=100, .ask_size=200});
 
-// Observer
-Vec3 pos = transform_view.read_guarded<Vec3>("position");
-transform_view.write_guarded("position", Vec3{4.0f, 5.0f, 6.0f});
+// Observer (automatic seqlock handling)
+Quote quote = market_data_view["best_quote"];
+market_data_view["best_quote"] = Quote{.bid_price=15021, .ask_price=15026};
 ```
 
 ### Mutex Wrapper (`Locked<T>`)
@@ -579,44 +667,18 @@ struct Locked {
 **Usage:**
 
 ```cpp
-struct [[memglass::observe]] Stats {
+struct [[memglass::observe]] TradingStatus {
     memglass::Locked<char[256]> last_error;  // Or use: // @locked
+    memglass::Locked<char[128]> connection_state;
 };
 
 // Producer
-stats->last_error.write("Connection timeout");
+status->last_error.write("Exchange connection timeout");
 
 // Observer - read-modify-write
-stats_view.update_locked<char[256]>("last_error", [](char* buf) {
+status["last_error"].update([](char* buf) {
     std::strcat(buf, " (retrying)");
 });
-```
-
-### Observer API for Atomic Access
-
-```cpp
-auto view = observer.find("player_1");
-
-// Detect field atomicity from metadata
-FieldInfo info = view.field_info("health");
-switch (info.atomicity) {
-    case Atomicity::None:
-        float h = view.read<float>("health");  // May tear
-        break;
-    case Atomicity::Atomic:
-        float h = view.read_atomic<float>("health");  // Uses std::atomic
-        break;
-    case Atomicity::Seqlock:
-        Vec3 p = view.read_guarded<Vec3>("position");  // Uses seqlock
-        break;
-    case Atomicity::Locked:
-        auto name = view.read_locked<char[32]>("name");  // Uses mutex
-        break;
-}
-
-// Automatic dispatch based on metadata
-float h = view.read_safe<float>("health");  // Chooses correct method
-view.write_safe("health", 100.0f);          // Chooses correct method
 ```
 
 ### memglass-view Integration
@@ -624,18 +686,19 @@ view.write_safe("health", 100.0f);          // Chooses correct method
 The viewer automatically uses the correct access method:
 
 ```
-┌─ entity_0 : Entity ─────────────────────────┐
-│ id         uint32   42                      │
-│ health     float    87.5         [atomic]   │  ← Shows consistency level
-│ position   Vec3     ▼            [seqlock]  │
-│   x        float    3.141593                │
-│   y        float    0.000000                │
-│   z        float    -2.718282               │
-│ name       char[32] "Player1"    [locked]   │
+┌─ AAPL_position : Position ──────────────────┐
+│ symbol_id  uint32   1                       │
+│ quantity   int64    500          [atomic]   │  ← Shows consistency level
+│ last_quote Quote    ▼            [seqlock]  │
+│   bid_price  int64    15020                 │
+│   ask_price  int64    15025                 │
+│   bid_size   uint32   100                   │
+│   ask_size   uint32   200                   │
+│ error_msg  char[256] ""          [locked]   │
 └─────────────────────────────────────────────┘
 ```
 
-When editing, the viewer uses `write_safe()` to ensure correct synchronization.
+When editing, the viewer uses the same `operator[]` API which automatically handles synchronization.
 
 ### Performance Considerations
 
@@ -647,8 +710,8 @@ When editing, the viewer uses `write_safe()` to ensure correct synchronization.
 | `Locked<T>` | ~20-100 ns | ~20-100 ns | Exclusive access |
 
 **Guidelines:**
-- Use `@atomic` for frequently-updated scalars (counters, flags, health)
-- Use `@seqlock` for compound values read often, written rarely (position, orientation)
+- Use `@atomic` for frequently-updated scalars (counters, flags, quantities)
+- Use `@seqlock` for compound values read often, written rarely (quotes, OHLC bars)
 - Use `@locked` for strings or values needing RMW operations
 - Default (none) for debugging data or where tearing is acceptable
 
@@ -720,10 +783,10 @@ The `memglass-gen` tool uses libclang to parse C++ headers and extract struct la
 ### How It Works
 
 ```
-┌──────────────┐     ┌─────────────┐     ┌───────────────────┐
-│ game_types.h │────▶│ memglass-gen│────▶│ memglass_generated│
-│              │     │ (libclang)  │     │ .hpp              │
-└──────────────┘     └─────────────┘     └───────────────────┘
+┌────────────────┐     ┌─────────────┐     ┌───────────────────┐
+│trading_types.h │────▶│ memglass-gen│────▶│ memglass_generated│
+│                │     │ (libclang)  │     │ .hpp              │
+└────────────────┘     └─────────────┘     └───────────────────┘
        │                    │                      │
        │                    ▼                      │
        │            ┌─────────────┐                │
@@ -754,14 +817,14 @@ find_package(memglass REQUIRED)
 
 # Automatically generate reflection code for your headers
 memglass_generate(
-    TARGET my_game
+    TARGET trading_engine
     HEADERS
-        include/game_types.hpp
-        include/player.hpp
+        include/trading_types.hpp
+        include/market_data.hpp
     OUTPUT ${CMAKE_BINARY_DIR}/generated/memglass_generated.hpp
 )
 
-target_link_libraries(my_game PRIVATE memglass::memglass)
+target_link_libraries(trading_engine PRIVATE memglass::memglass)
 ```
 
 ### Command Line Usage
@@ -817,15 +880,15 @@ Inline comments on struct fields can contain annotations that memglass-gen extra
 **Syntax:**
 
 ```cpp
-struct [[memglass::observe]] Player {
-    uint32_t id;              // @readonly
-    Vec3 position;            // @range(-1000.0, 1000.0)
-    float health;             // @range(0, 100) @format("%.1f HP")
-    float speed;              // @min(0) @max(500) @step(0.5)
-    char name[32];            // @regex("[A-Za-z0-9_]{3,20}")
-    uint32_t state;           // @enum(IDLE=0, RUNNING=1, JUMPING=2, DEAD=3)
-    uint32_t flags;           // @flags(INVINCIBLE=1, INVISIBLE=2, FROZEN=4)
-    int32_t score;            // @readonly @format("%+d")
+struct [[memglass::observe]] Order {
+    uint64_t order_id;        // @readonly
+    int64_t price;            // @min(0) @format("%.2f") @unit("ticks")
+    uint32_t quantity;        // @range(1, 1000000) @step(100)
+    uint32_t filled_qty;      // @readonly @format("%d")
+    char symbol[16];          // @regex("[A-Z]{1,5}")
+    int8_t side;              // @enum(BUY=1, SELL=-1)
+    int8_t status;            // @enum(PENDING=0, OPEN=1, FILLED=2, CANCELLED=3, REJECTED=4)
+    uint32_t flags;           // @flags(IOC=1, FOK=2, POST_ONLY=4, REDUCE_ONLY=8)
 };
 ```
 
@@ -852,18 +915,18 @@ struct [[memglass::observe]] Player {
 
 ```cpp
 // memglass_generated.hpp (excerpt)
-template<> struct TypeDescriptor<Player> {
+template<> struct TypeDescriptor<Order> {
     // ... fields array ...
 
     static constexpr std::array<FieldMeta, 8> metadata = {{
-        {.readonly = true},                                           // id
-        {.range = {-1000.0, 1000.0}},                                 // position
-        {.range = {0, 100}, .format = "%.1f HP"},                     // health
-        {.range = {0, 500}, .step = 0.5},                             // speed
-        {.regex = "[A-Za-z0-9_]{3,20}"},                              // name
-        {.enum_values = {{"IDLE",0},{"RUNNING",1},{"JUMPING",2},{"DEAD",3}}}, // state
-        {.flags = {{"INVINCIBLE",1},{"INVISIBLE",2},{"FROZEN",4}}},   // flags
-        {.readonly = true, .format = "%+d"},                          // score
+        {.readonly = true},                                           // order_id
+        {.range_min = 0, .format = "%.2f", .unit = "ticks"},          // price
+        {.range = {1, 1000000}, .step = 100},                         // quantity
+        {.readonly = true, .format = "%d"},                           // filled_qty
+        {.regex = "[A-Z]{1,5}"},                                      // symbol
+        {.enum_values = {{"BUY",1},{"SELL",-1}}},                     // side
+        {.enum_values = {{"PENDING",0},{"OPEN",1},{"FILLED",2},{"CANCELLED",3},{"REJECTED",4}}}, // status
+        {.flags = {{"IOC",1},{"FOK",2},{"POST_ONLY",4},{"REDUCE_ONLY",8}}}, // flags
     }};
 };
 ```
@@ -920,21 +983,20 @@ An interactive terminal-based tool for real-time visualization of shared memory 
 ### Screenshot (Mockup)
 
 ```
-┌─ memglass-view ── game_server ── PID:12345 ── 3 regions ── 47 objects ─────┐
+┌─ memglass-view ── trading_engine ── PID:12345 ── 3 regions ── 47 objects ──┐
 │                                                                             │
-│ ┌─ Objects ─────────────────────┐ ┌─ entity_0 : Entity ───────────────────┐│
-│ │ ▶ entity_0        Entity      │ │ id         uint32   42                ││
-│ │   entity_1        Entity      │ │ position   Vec3     ▼                 ││
-│ │   entity_2        Entity      │ │   x        float    3.141593          ││
-│ │   entity_3        Entity      │ │   y        float    0.000000          ││
-│ │   entity_4        Entity      │ │   z        float    -2.718282         ││
-│ │   entity_5        Entity      │ │ velocity   Vec3     ▶ {...}           ││
-│ │   entity_6        Entity      │ │ health     float    87.500000         ││
-│ │   entity_7        Entity      │ │ is_active  bool     true              ││
-│ │   entity_8        Entity      │ │                                       ││
-│ │   entity_9        Entity      │ │ Offset: 0x1A40  Size: 28 bytes        ││
-│ │   player_main     Player      │ │ Region: 1       Gen: 1                ││
-│ │   camera          Camera      │ └───────────────────────────────────────┘│
+│ ┌─ Objects ─────────────────────┐ ┌─ order_12345 : Order ─────────────────┐│
+│ │ ▶ order_12345     Order       │ │ order_id   uint64   12345             ││
+│ │   order_12346     Order       │ │ symbol_id  uint32   1                 ││
+│ │   order_12347     Order       │ │ price      int64    15025             ││
+│ │   order_12348     Order       │ │ quantity   uint32   100               ││
+│ │   order_12349     Order       │ │ filled_qty uint32   50                ││
+│ │   AAPL_position   Position    │ │ side       int8     1        [BUY]    ││
+│ │   MSFT_position   Position    │ │ status     int8     1        [OPEN]   ││
+│ │   GOOG_position   Position    │ │                                       ││
+│ │   AAPL_quote      Quote       │ │ Offset: 0x1A40  Size: 32 bytes        ││
+│ │   MSFT_quote      Quote       │ │ Region: 1       Gen: 1                ││
+│ │   engine_stats    TradingStats│ └───────────────────────────────────────┘│
 │ └───────────────────────────────┘                                          │
 │ ┌─ Memory Map ─────────────────────────────────────────────────────────────┐│
 │ │ Region 1 [████████████░░░░░░░░░░░░░░░░░░░░] 38% (389KB / 1MB)           ││
@@ -981,19 +1043,19 @@ An interactive terminal-based tool for real-time visualization of shared memory 
 
 ```bash
 # Connect to a session
-memglass-view game_server
+memglass-view trading_engine
 
 # Custom refresh rate (default 10 Hz)
-memglass-view --rate 60 game_server
+memglass-view --rate 60 trading_engine
 
 # Filter to specific type on startup
-memglass-view --type Entity game_server
+memglass-view --type Order trading_engine
 
 # Hex view mode by default
-memglass-view --hex game_server
+memglass-view --hex trading_engine
 
 # Watch specific fields
-memglass-view --watch "player_main.health" --watch "player_main.position" game_server
+memglass-view --watch "AAPL_position.quantity" --watch "AAPL_quote.bid_price" trading_engine
 ```
 
 ### Architecture
@@ -1094,14 +1156,14 @@ memglass-view can write values directly to shared memory. Editing respects metad
 **Edit Dialog (mockup):**
 
 ```
-┌─ Edit: player_1.health ─────────────────────┐
+┌─ Edit: order_12345.quantity ────────────────┐
 │                                             │
-│  Type:   float                              │
-│  Range:  0 - 100                            │
-│  Step:   0.5                                │
+│  Type:   uint32                             │
+│  Range:  1 - 1000000                        │
+│  Step:   100                                │
 │                                             │
-│  Current: 87.5                              │
-│  New:     [85.0_____________]               │
+│  Current: 100                               │
+│  New:     [200______________]               │
 │                                             │
 │  [Enter] Apply  [Esc] Cancel  [+/-] Adjust  │
 └─────────────────────────────────────────────┘
@@ -1110,12 +1172,13 @@ memglass-view can write values directly to shared memory. Editing respects metad
 **Enum Picker:**
 
 ```
-┌─ Edit: player_1.state ──────────────────────┐
+┌─ Edit: order_12345.status ──────────────────┐
 │                                             │
-│  ○ IDLE      (0)                            │
-│  ● RUNNING   (1)  ← current                 │
-│  ○ JUMPING   (2)                            │
-│  ○ DEAD      (3)                            │
+│  ○ PENDING    (0)                           │
+│  ● OPEN       (1)  ← current                │
+│  ○ FILLED     (2)                           │
+│  ○ CANCELLED  (3)                           │
+│  ○ REJECTED   (4)                           │
 │                                             │
 │  [Enter] Select  [Esc] Cancel               │
 └─────────────────────────────────────────────┘
@@ -1124,13 +1187,14 @@ memglass-view can write values directly to shared memory. Editing respects metad
 **Flags Editor:**
 
 ```
-┌─ Edit: player_1.flags ──────────────────────┐
+┌─ Edit: order_12345.flags ───────────────────┐
 │                                             │
-│  [x] INVINCIBLE  (bit 0)                    │
-│  [ ] INVISIBLE   (bit 1)                    │
-│  [x] FROZEN      (bit 2)                    │
+│  [x] IOC         (bit 0)                    │
+│  [ ] FOK         (bit 1)                    │
+│  [ ] POST_ONLY   (bit 2)                    │
+│  [ ] REDUCE_ONLY (bit 3)                    │
 │                                             │
-│  Value: 5 (0x05)                            │
+│  Value: 1 (0x01)                            │
 │                                             │
 │  [Space] Toggle  [Enter] Done  [Esc] Cancel │
 └─────────────────────────────────────────────┘
@@ -1196,10 +1260,10 @@ public:
 
 ```bash
 # Read-only mode (disable editing)
-memglass-view --readonly game_server
+memglass-view --readonly trading_engine
 
 # Allow editing (default)
-memglass-view --edit game_server
+memglass-view --edit trading_engine
 ```
 
 ## File Structure
@@ -1271,76 +1335,112 @@ memglass/
 
 ## Example: Complete Usage
 
-### Producer (Game Server)
+### Producer (Trading Engine)
 
 ```cpp
-// game_types.hpp
+// trading_types.hpp
 #pragma once
 #include <cstdint>
 #include <atomic>
 
-struct [[memglass::observe]] Vec3 {
-    float x, y, z;
+struct [[memglass::observe]] Quote {
+    int64_t bid_price;      // @seqlock - Price in ticks
+    int64_t ask_price;
+    uint32_t bid_size;
+    uint32_t ask_size;
+    uint64_t timestamp_ns;
 };
 
-struct [[memglass::observe]] Entity {
-    uint32_t id;
-    Vec3 position;
-    Vec3 velocity;
-    float health;
-    std::atomic<bool> is_active;
+struct [[memglass::observe]] Position {
+    uint32_t symbol_id;
+    int64_t quantity;       // @atomic
+    int64_t avg_price;
+    int64_t realized_pnl;
+    int64_t unrealized_pnl;
+    Quote last_quote;       // @seqlock
+};
+
+struct [[memglass::observe]] Order {
+    uint64_t order_id;      // @readonly
+    uint32_t symbol_id;
+    int64_t price;
+    uint32_t quantity;
+    uint32_t filled_qty;
+    int8_t side;            // @enum(BUY=1, SELL=-1)
+    int8_t status;          // @enum(PENDING=0, OPEN=1, FILLED=2, CANCELLED=3)
 };
 ```
 
 ```cpp
 // producer.cpp
 #include <memglass/memglass.hpp>
-#include "game_types.hpp"
+#include "trading_types.hpp"
 #include "memglass_generated.hpp"  // Auto-generated by memglass-gen
 #include <thread>
-#include <cmath>
+#include <random>
 
 int main() {
-    memglass::init("game_server");
+    memglass::init("trading_engine");
     memglass::generated::register_all_types();  // Register discovered types
 
-    // Create some entities
-    std::vector<Entity*> entities;
-    for (int i = 0; i < 10; i++) {
-        auto* e = memglass::create<Entity>(fmt::format("entity_{}", i));
-        e->id = i;
-        e->position = {float(i), 0.0f, 0.0f};
-        e->health = 100.0f;
-        e->is_active = true;
-        entities.push_back(e);
+    // Create positions for tracked symbols
+    const char* symbols[] = {"AAPL", "MSFT", "GOOG", "AMZN", "META"};
+    std::vector<Position*> positions;
+    std::vector<Quote*> quotes;
+
+    for (int i = 0; i < 5; i++) {
+        auto* pos = memglass::create<Position>(fmt::format("{}_position", symbols[i]));
+        pos->symbol_id = i;
+        pos->quantity = 0;
+        pos->avg_price = 0;
+        positions.push_back(pos);
+
+        auto* quote = memglass::create<Quote>(fmt::format("{}_quote", symbols[i]));
+        quote->bid_price = 15000 + i * 1000;  // Starting prices
+        quote->ask_price = quote->bid_price + 5;
+        quote->bid_size = 100;
+        quote->ask_size = 100;
+        quotes.push_back(quote);
     }
 
-    // Simulation loop
-    float t = 0;
+    // Market simulation loop
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> price_delta(-10, 10);
+
     while (true) {
-        for (auto* e : entities) {
-            e->position.x = std::sin(t + e->id) * 10.0f;
-            e->position.z = std::cos(t + e->id) * 10.0f;
+        for (int i = 0; i < 5; i++) {
+            // Update quotes with price movement
+            quotes[i]->bid_price += price_delta(gen);
+            quotes[i]->ask_price = quotes[i]->bid_price + 5;
+            quotes[i]->timestamp_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+
+            // Update position P&L
+            positions[i]->last_quote = *quotes[i];
+            if (positions[i]->quantity != 0) {
+                int64_t mark = quotes[i]->bid_price;
+                positions[i]->unrealized_pnl =
+                    (mark - positions[i]->avg_price) * positions[i]->quantity;
+            }
         }
-        t += 0.016f;
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     memglass::shutdown();
 }
 ```
 
-### Observer (Debug Tool)
+### Observer (Monitoring Tool)
 
 ```cpp
 #include <memglass/observer.hpp>
 #include <iostream>
 
 int main() {
-    memglass::Observer obs("game_server");
+    memglass::Observer obs("trading_engine");
 
     if (!obs.connect()) {
-        std::cerr << "Cannot connect to game_server\n";
+        std::cerr << "Cannot connect to trading_engine\n";
         return 1;
     }
 
@@ -1348,19 +1448,27 @@ int main() {
         obs.refresh();
 
         std::cout << "\033[2J\033[H";  // Clear screen
-        std::cout << "=== Game Server Telemetry ===\n\n";
+        std::cout << "=== Trading Engine Telemetry ===\n\n";
 
         for (const auto& obj : obs.objects()) {
-            if (obj.type_name == "Entity") {
+            if (obj.type_name == "Position") {
                 auto view = obs.get(obj);
-                auto pos = view.field("position");
 
-                std::cout << fmt::format("{}: pos=({:.1f}, {:.1f}, {:.1f}) health={:.0f}\n",
+                std::cout << fmt::format("{}: qty={} avg_px={} pnl={}\n",
                     obj.label,
-                    pos.read<float>("x"),
-                    pos.read<float>("y"),
-                    pos.read<float>("z"),
-                    view.read<float>("health")
+                    (int64_t)view["quantity"],
+                    (int64_t)view["avg_price"],
+                    (int64_t)view["unrealized_pnl"]
+                );
+            } else if (obj.type_name == "Quote") {
+                auto view = obs.get(obj);
+
+                std::cout << fmt::format("{}: {} @ {} x {} @ {}\n",
+                    obj.label,
+                    (uint32_t)view["bid_size"],
+                    (int64_t)view["bid_price"],
+                    (int64_t)view["ask_price"],
+                    (uint32_t)view["ask_size"]
                 );
             }
         }

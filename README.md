@@ -21,25 +21,30 @@ Producer Process                    Observer Process
 ```cpp
 #include <memglass/memglass.hpp>
 
-struct Vec3 { float x, y, z; };
-MEMGLASS_REGISTER(Vec3, x, y, z);
-
-struct Player {
-    uint32_t id;
-    Vec3 position;
-    float health;
+struct [[memglass::observe]] Quote {
+    int64_t bid_price;
+    int64_t ask_price;
+    uint32_t bid_size;
+    uint32_t ask_size;
+    uint64_t timestamp_ns;
 };
-MEMGLASS_REGISTER(Player, id, position, health);
+
+struct [[memglass::observe]] Position {
+    uint32_t symbol_id;
+    int64_t quantity;       // @atomic
+    int64_t avg_price;
+    Quote last_quote;       // @seqlock
+};
 
 int main() {
-    memglass::init("my_game");
+    memglass::init("trading_engine");
 
-    auto* player = memglass::create<Player>("player_1");
-    player->id = 1;
-    player->health = 100.0f;
+    auto* pos = memglass::create<Position>("AAPL_position");
+    pos->symbol_id = 1;
+    pos->quantity = 0;
 
     while (running) {
-        player->position.x += 0.1f;  // Just write normally
+        pos->last_quote.bid_price = get_market_bid();  // Just write normally
     }
 
     memglass::shutdown();
@@ -51,18 +56,15 @@ int main() {
 #include <memglass/observer.hpp>
 
 int main() {
-    memglass::Observer obs("my_game");
+    memglass::Observer obs("trading_engine");
     obs.connect();
 
     while (true) {
-        if (auto p = obs.find("player_1")) {
-            float health = p.read<float>("health");
-            auto pos = p.field("position");
-            printf("Player at (%.1f, %.1f, %.1f) health=%.0f\n",
-                   pos.read<float>("x"),
-                   pos.read<float>("y"),
-                   pos.read<float>("z"),
-                   health);
+        if (auto p = obs.find("AAPL_position")) {
+            int64_t qty = p["quantity"];
+            int64_t bid = p["last_quote"]["bid_price"];
+            int64_t ask = p["last_quote"]["ask_price"];
+            printf("AAPL: qty=%ld bid=%ld ask=%ld\n", qty, bid, ask);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

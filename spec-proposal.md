@@ -566,6 +566,163 @@ Key libclang functions used:
 - `clang_Type_getSizeOf()` - Get type sizes
 - `clang_Type_getOffsetOf()` - Get field offsets
 
+## memglass-view: ncurses Memory Visualizer
+
+An interactive terminal-based tool for real-time visualization of shared memory state.
+
+### Screenshot (Mockup)
+
+```
+┌─ memglass-view ── game_server ── PID:12345 ── 3 regions ── 47 objects ─────┐
+│                                                                             │
+│ ┌─ Objects ─────────────────────┐ ┌─ entity_0 : Entity ───────────────────┐│
+│ │ ▶ entity_0        Entity      │ │ id         uint32   42                ││
+│ │   entity_1        Entity      │ │ position   Vec3     ▼                 ││
+│ │   entity_2        Entity      │ │   x        float    3.141593          ││
+│ │   entity_3        Entity      │ │   y        float    0.000000          ││
+│ │   entity_4        Entity      │ │   z        float    -2.718282         ││
+│ │   entity_5        Entity      │ │ velocity   Vec3     ▶ {...}           ││
+│ │   entity_6        Entity      │ │ health     float    87.500000         ││
+│ │   entity_7        Entity      │ │ is_active  bool     true              ││
+│ │   entity_8        Entity      │ │                                       ││
+│ │   entity_9        Entity      │ │ Offset: 0x1A40  Size: 28 bytes        ││
+│ │   player_main     Player      │ │ Region: 1       Gen: 1                ││
+│ │   camera          Camera      │ └───────────────────────────────────────┘│
+│ └───────────────────────────────┘                                          │
+│ ┌─ Memory Map ─────────────────────────────────────────────────────────────┐│
+│ │ Region 1 [████████████░░░░░░░░░░░░░░░░░░░░] 38% (389KB / 1MB)           ││
+│ │ Region 2 [██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]  6% (128KB / 2MB)           ││
+│ └───────────────────────────────────────────────────────────────────────────┘│
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [q]uit [r]efresh [f]ilter [/]search [h]ex [w]atch [Tab]switch  Rate: 60Hz  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+1. **Object Browser** - Scrollable list of all live objects with type info
+2. **Field Inspector** - Hierarchical view of selected object's fields
+3. **Live Updates** - Values refresh in real-time (configurable rate)
+4. **Memory Map** - Visual representation of region utilization
+5. **Hex View** - Raw memory dump of selected object (toggle with `h`)
+6. **Search/Filter** - Find objects by label or type (press `/` or `f`)
+7. **Watch List** - Pin specific fields to always-visible panel
+8. **Change Highlighting** - Flash values that changed since last frame
+
+### Keyboard Controls
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` or `j/k` | Navigate object list |
+| `Enter` | Expand/collapse nested struct |
+| `Tab` | Switch focus between panels |
+| `h` | Toggle hex view for selected object |
+| `w` | Add field to watch list |
+| `f` | Filter objects by type |
+| `/` | Search objects by label |
+| `r` | Force refresh |
+| `+/-` | Increase/decrease refresh rate |
+| `q` | Quit |
+
+### Command Line Usage
+
+```bash
+# Connect to a session
+memglass-view game_server
+
+# Custom refresh rate (default 10 Hz)
+memglass-view --rate 60 game_server
+
+# Filter to specific type on startup
+memglass-view --type Entity game_server
+
+# Hex view mode by default
+memglass-view --hex game_server
+
+# Watch specific fields
+memglass-view --watch "player_main.health" --watch "player_main.position" game_server
+```
+
+### Architecture
+
+```cpp
+// Simplified structure
+class App {
+    memglass::Observer observer_;
+
+    // UI panels
+    ObjectListPanel object_list_;
+    ObjectDetailPanel detail_;
+    MemoryMapPanel memory_map_;
+    HexViewPanel hex_view_;
+    WatchPanel watch_;
+
+    // State
+    std::string selected_object_;
+    std::vector<std::string> watch_list_;
+    int refresh_rate_hz_ = 10;
+
+public:
+    void run() {
+        initscr();
+        cbreak();
+        noecho();
+        keypad(stdscr, TRUE);
+        nodelay(stdscr, TRUE);
+
+        while (!quit_) {
+            handle_input();
+            if (should_refresh()) {
+                observer_.refresh();
+                render();
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+
+        endwin();
+    }
+
+    void render() {
+        object_list_.render(observer_.objects());
+        detail_.render(observer_.find(selected_object_));
+        memory_map_.render(observer_.regions());
+        // ...
+        refresh();
+    }
+};
+```
+
+### Value Formatting
+
+The tool automatically formats values based on type:
+
+| Type | Format |
+|------|--------|
+| `bool` | `true` / `false` |
+| `int8/16/32/64` | Decimal with thousands separator |
+| `uint8/16/32/64` | Decimal (hex with `h` modifier) |
+| `float/double` | 6 significant digits |
+| `char[N]` | String (escaped non-printable) |
+| `T[N]` | `[N elements]` (expandable) |
+| Nested struct | `▶ {...}` (expandable) |
+
+### Change Detection
+
+Fields that changed since last frame are highlighted:
+
+```
+│ health     float    87.5  →  82.3   │  (value shown in bold/color)
+```
+
+Configuration via command line:
+```bash
+# Highlight duration in frames
+memglass-view --highlight-frames 30 game_server
+
+# Disable highlighting
+memglass-view --no-highlight game_server
+```
+
 ## File Structure
 
 ```
@@ -592,12 +749,24 @@ memglass/
 │       ├── shm_posix.cpp
 │       └── shm_windows.cpp
 ├── tools/
-│   └── memglass-gen/
-│       ├── CMakeLists.txt     # Links against libclang
+│   ├── memglass-gen/
+│   │   ├── CMakeLists.txt     # Links against libclang
+│   │   ├── main.cpp           # CLI entry point
+│   │   ├── generator.hpp      # Generator class
+│   │   ├── generator.cpp      # AST traversal, code emission
+│   │   └── type_mapper.cpp    # C++ type to PrimitiveType mapping
+│   └── memglass-view/
+│       ├── CMakeLists.txt     # Links against ncurses
 │       ├── main.cpp           # CLI entry point
-│       ├── generator.hpp      # Generator class
-│       ├── generator.cpp      # AST traversal, code emission
-│       └── type_mapper.cpp    # C++ type to PrimitiveType mapping
+│       ├── app.hpp            # Application state
+│       ├── app.cpp            # Main loop, input handling
+│       ├── ui/
+│       │   ├── layout.hpp     # Window layout management
+│       │   ├── object_list.cpp    # Object browser panel
+│       │   ├── object_detail.cpp  # Field inspector panel
+│       │   ├── memory_map.cpp     # Region visualization
+│       │   └── hex_view.cpp       # Raw memory hex dump
+│       └── format.cpp         # Value formatting utilities
 ├── cmake/
 │   ├── FindLibClang.cmake
 │   └── MemglassGenerate.cmake # memglass_generate() function
@@ -737,9 +906,16 @@ int main() {
 
 ## Dependencies
 
+**Core library:**
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 19.29+)
 - fmt (formatting, can be replaced with std::format on C++23)
 - Optional: Boost.Interprocess (alternative allocator backend)
+
+**memglass-gen:**
+- libclang (LLVM/Clang development libraries)
+
+**memglass-view:**
+- ncurses (ncursesw for wide character support)
 
 ## Open Questions
 

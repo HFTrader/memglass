@@ -14,9 +14,9 @@ A producer application allocates POD structs in shared memory with automatic fie
 Producer Process                    Observer Process
      │                                    │
      ▼                                    ▼
-┌─────────┐    ┌──────────────┐    ┌─────────┐
+┌─────────┐    ┌───────────────┐    ┌─────────┐
 │ Objects │───▶│ Shared Memory │◀───│ Reader  │
-└─────────┘    └──────────────┘    └─────────┘
+└─────────┘    └───────────────┘    └─────────┘
 ```
 
 ## Building

@@ -49,6 +49,42 @@ private:
     Region* current_region();
 };
 
+// Metadata manager - handles overflow regions for types, fields, and objects
+class MetadataManager {
+public:
+    explicit MetadataManager(Context& ctx);
+    ~MetadataManager();
+
+    // Initialize (called after header is set up)
+    bool init(std::string_view session_name);
+
+    // Allocate entries (from header first, then overflow regions)
+    ObjectEntry* allocate_object_entry();
+    TypeEntry* allocate_type_entry();
+    FieldEntry* allocate_field_entries(uint32_t count);
+
+    // Get total counts (header + overflow)
+    uint32_t total_object_count() const;
+    uint32_t total_type_count() const;
+    uint32_t total_field_count() const;
+
+private:
+    struct OverflowRegion {
+        detail::SharedMemory shm;
+        uint64_t id;
+        MetadataOverflowDescriptor* descriptor;
+    };
+
+    Context& ctx_;
+    std::string session_name_;
+    std::vector<std::unique_ptr<OverflowRegion>> overflow_regions_;
+    std::mutex mutex_;
+    uint64_t next_overflow_id_ = 1;
+
+    OverflowRegion* create_overflow_region();
+    OverflowRegion* current_overflow_region();
+};
+
 // Object manager - tracks object lifecycle
 class ObjectManager {
 public:

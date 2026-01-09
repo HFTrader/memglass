@@ -53,5 +53,6 @@ private:
 // Generate shared memory name for session
 std::string make_header_shm_name(std::string_view session_name);
 std::string make_region_shm_name(std::string_view session_name, uint64_t region_id);
+std::string make_overflow_shm_name(std::string_view session_name, uint64_t overflow_id);
 
 } // namespace memglass::detail

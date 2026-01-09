@@ -146,6 +146,7 @@ void Observer::disconnect() {
     if (!connected_) return;
 
     region_shms_.clear();
+    overflow_shms_.clear();
     types_.clear();
     type_id_to_index_.clear();
     header_shm_.close();
@@ -160,6 +161,7 @@ void Observer::refresh() {
     if (current_seq != last_sequence_) {
         load_types();
         load_regions();
+        load_overflow_regions();
         last_sequence_ = current_seq;
     }
 }
@@ -183,48 +185,13 @@ std::vector<ObservedObject> Observer::objects() const {
     std::vector<ObservedObject> result;
     if (!header_) return result;
 
-    uint32_t count = header_->object_count.load(std::memory_order_acquire);
-    auto* entries = reinterpret_cast<const ObjectEntry*>(
-        static_cast<const char*>(header_shm_.data()) + header_->object_dir_offset);
+    // Helper lambda to add object entries from a memory region
+    auto add_objects = [&](const ObjectEntry* entries, uint32_t count) {
+        for (uint32_t i = 0; i < count; ++i) {
+            ObjectState state = static_cast<ObjectState>(
+                entries[i].state.load(std::memory_order_acquire));
+            if (state != ObjectState::Alive) continue;
 
-    for (uint32_t i = 0; i < count; ++i) {
-        ObjectState state = static_cast<ObjectState>(
-            entries[i].state.load(std::memory_order_acquire));
-        if (state != ObjectState::Alive) continue;
-
-        ObservedObject obj;
-        obj.label = entries[i].label;
-        obj.type_id = entries[i].type_id;
-        obj.region_id = entries[i].region_id;
-        obj.offset = entries[i].offset;
-        obj.generation = entries[i].generation;
-        obj.state = state;
-
-        // Get type name
-        auto it = type_id_to_index_.find(obj.type_id);
-        if (it != type_id_to_index_.end()) {
-            obj.type_name = types_[it->second].name;
-        }
-
-        result.push_back(std::move(obj));
-    }
-
-    return result;
-}
-
-ObjectView Observer::find(std::string_view label) {
-    if (!header_) return ObjectView();
-
-    uint32_t count = header_->object_count.load(std::memory_order_acquire);
-    auto* entries = reinterpret_cast<const ObjectEntry*>(
-        static_cast<const char*>(header_shm_.data()) + header_->object_dir_offset);
-
-    for (uint32_t i = 0; i < count; ++i) {
-        ObjectState state = static_cast<ObjectState>(
-            entries[i].state.load(std::memory_order_acquire));
-        if (state != ObjectState::Alive) continue;
-
-        if (std::string_view(entries[i].label) == label) {
             ObservedObject obj;
             obj.label = entries[i].label;
             obj.type_id = entries[i].type_id;
@@ -233,12 +200,82 @@ ObjectView Observer::find(std::string_view label) {
             obj.generation = entries[i].generation;
             obj.state = state;
 
+            // Get type name
             auto it = type_id_to_index_.find(obj.type_id);
             if (it != type_id_to_index_.end()) {
                 obj.type_name = types_[it->second].name;
             }
 
-            return ObjectView(*this, obj);
+            result.push_back(std::move(obj));
+        }
+    };
+
+    // Add objects from header
+    uint32_t count = header_->object_count.load(std::memory_order_acquire);
+    auto* entries = reinterpret_cast<const ObjectEntry*>(
+        static_cast<const char*>(header_shm_.data()) + header_->object_dir_offset);
+    add_objects(entries, count);
+
+    // Add objects from overflow regions
+    for (const auto& [id, shm] : overflow_shms_) {
+        auto* desc = static_cast<const MetadataOverflowDescriptor*>(shm.data());
+        uint32_t overflow_count = desc->object_entry_count.load(std::memory_order_acquire);
+        auto* overflow_entries = reinterpret_cast<const ObjectEntry*>(
+            static_cast<const char*>(shm.data()) + desc->object_entry_offset);
+        add_objects(overflow_entries, overflow_count);
+    }
+
+    return result;
+}
+
+ObjectView Observer::find(std::string_view label) {
+    if (!header_) return ObjectView();
+
+    // Helper lambda to search for an object by label
+    auto search_entries = [&](const ObjectEntry* entries, uint32_t count) -> std::optional<ObservedObject> {
+        for (uint32_t i = 0; i < count; ++i) {
+            ObjectState state = static_cast<ObjectState>(
+                entries[i].state.load(std::memory_order_acquire));
+            if (state != ObjectState::Alive) continue;
+
+            if (std::string_view(entries[i].label) == label) {
+                ObservedObject obj;
+                obj.label = entries[i].label;
+                obj.type_id = entries[i].type_id;
+                obj.region_id = entries[i].region_id;
+                obj.offset = entries[i].offset;
+                obj.generation = entries[i].generation;
+                obj.state = state;
+
+                auto it = type_id_to_index_.find(obj.type_id);
+                if (it != type_id_to_index_.end()) {
+                    obj.type_name = types_[it->second].name;
+                }
+
+                return obj;
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Search in header
+    uint32_t count = header_->object_count.load(std::memory_order_acquire);
+    auto* entries = reinterpret_cast<const ObjectEntry*>(
+        static_cast<const char*>(header_shm_.data()) + header_->object_dir_offset);
+
+    if (auto found = search_entries(entries, count)) {
+        return ObjectView(*this, *found);
+    }
+
+    // Search in overflow regions
+    for (const auto& [id, shm] : overflow_shms_) {
+        auto* desc = static_cast<const MetadataOverflowDescriptor*>(shm.data());
+        uint32_t overflow_count = desc->object_entry_count.load(std::memory_order_acquire);
+        auto* overflow_entries = reinterpret_cast<const ObjectEntry*>(
+            static_cast<const char*>(shm.data()) + desc->object_entry_offset);
+
+        if (auto found = search_entries(overflow_entries, overflow_count)) {
+            return ObjectView(*this, *found);
         }
     }
 
@@ -326,6 +363,38 @@ void Observer::load_regions() {
         uint64_t next_id = desc->next_region_id.load(std::memory_order_acquire);
         region_shms_[region_id] = std::move(shm);
         region_id = next_id;
+    }
+}
+
+void Observer::load_overflow_regions() {
+    if (!header_) return;
+
+    uint64_t overflow_id = header_->first_overflow_region_id.load(std::memory_order_acquire);
+
+    while (overflow_id != 0) {
+        // Skip if already loaded
+        if (overflow_shms_.find(overflow_id) != overflow_shms_.end()) {
+            // Get next overflow ID from existing region
+            auto* desc = static_cast<MetadataOverflowDescriptor*>(overflow_shms_[overflow_id].data());
+            overflow_id = desc->next_region_id.load(std::memory_order_acquire);
+            continue;
+        }
+
+        // Load new overflow region
+        std::string shm_name = detail::make_overflow_shm_name(session_name_, overflow_id);
+        detail::SharedMemory shm;
+        if (!shm.open(shm_name)) {
+            break;  // Can't load overflow region
+        }
+
+        auto* desc = static_cast<MetadataOverflowDescriptor*>(shm.data());
+        if (desc->magic != OVERFLOW_MAGIC) {
+            break;  // Invalid overflow region
+        }
+
+        uint64_t next_id = desc->next_region_id.load(std::memory_order_acquire);
+        overflow_shms_[overflow_id] = std::move(shm);
+        overflow_id = next_id;
     }
 }
 

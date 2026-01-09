@@ -73,6 +73,7 @@ bool Context::init(std::string_view session_name, const Config& config) {
     header_->object_count.store(0, std::memory_order_release);
 
     header_->first_region_id.store(0, std::memory_order_release);
+    header_->first_overflow_region_id.store(0, std::memory_order_release);
 
     // Set session info
     size_t name_len = std::min(session_name.size(), sizeof(header_->session_name) - 1);
@@ -85,6 +86,14 @@ bool Context::init(std::string_view session_name, const Config& config) {
     // Create region manager
     regions_ = std::make_unique<RegionManager>(*this);
     if (!regions_->init(session_name, config.initial_region_size)) {
+        header_shm_.close();
+        return false;
+    }
+
+    // Create metadata manager (for overflow regions)
+    metadata_ = std::make_unique<MetadataManager>(*this);
+    if (!metadata_->init(session_name)) {
+        regions_.reset();
         header_shm_.close();
         return false;
     }
@@ -103,6 +112,7 @@ void Context::shutdown() {
     if (!initialized_) return;
 
     objects_.reset();
+    metadata_.reset();
     regions_.reset();
     header_shm_.close();
 

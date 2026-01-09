@@ -175,4 +175,8 @@ std::string make_region_shm_name(std::string_view session_name, uint64_t region_
     return fmt::format("/memglass_{}_region_{:04d}", session_name, region_id);
 }
 
+std::string make_overflow_shm_name(std::string_view session_name, uint64_t overflow_id) {
+    return fmt::format("/memglass_{}_overflow_{:04d}", session_name, overflow_id);
+}
+
 } // namespace memglass::detail

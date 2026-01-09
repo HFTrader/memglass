@@ -265,12 +265,14 @@ private:
     TelemetryHeader* header_ = nullptr;
 
     std::unordered_map<uint64_t, detail::SharedMemory> region_shms_;
+    std::unordered_map<uint64_t, detail::SharedMemory> overflow_shms_;
     std::vector<ObservedType> types_;
     std::unordered_map<uint32_t, size_t> type_id_to_index_;
     uint64_t last_sequence_ = 0;
 
     void load_types();
     void load_regions();
+    void load_overflow_regions();
 };
 
 } // namespace memglass

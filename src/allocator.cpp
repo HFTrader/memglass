@@ -136,6 +136,238 @@ bool RegionManager::get_location(const void* ptr, uint64_t& region_id, uint64_t&
     return false;
 }
 
+// MetadataManager implementation
+
+MetadataManager::MetadataManager(Context& ctx)
+    : ctx_(ctx)
+{
+}
+
+MetadataManager::~MetadataManager() = default;
+
+bool MetadataManager::init(std::string_view session_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_name_ = std::string(session_name);
+    // No overflow region created initially - will create on demand
+    return true;
+}
+
+MetadataManager::OverflowRegion* MetadataManager::create_overflow_region() {
+    auto region = std::make_unique<OverflowRegion>();
+    region->id = next_overflow_id_++;
+
+    std::string shm_name = detail::make_overflow_shm_name(session_name_, region->id);
+
+    const Config& cfg = ctx_.config();
+    size_t region_size = cfg.overflow_region_size;
+
+    // Calculate capacities for this overflow region
+    // Split space roughly equally between objects, types, and fields
+    size_t header_size = sizeof(MetadataOverflowDescriptor);
+    size_t available = region_size - header_size;
+
+    // Allocate: 50% for objects, 10% for types, 40% for fields
+    uint32_t object_capacity = static_cast<uint32_t>((available * 50 / 100) / sizeof(ObjectEntry));
+    uint32_t type_capacity = static_cast<uint32_t>((available * 10 / 100) / sizeof(TypeEntry));
+    uint32_t field_capacity = static_cast<uint32_t>((available * 40 / 100) / sizeof(FieldEntry));
+
+    size_t object_size = object_capacity * sizeof(ObjectEntry);
+    size_t type_size = type_capacity * sizeof(TypeEntry);
+    size_t field_size = field_capacity * sizeof(FieldEntry);
+
+    size_t total_size = header_size + object_size + type_size + field_size;
+
+    if (!region->shm.create(shm_name, total_size)) {
+        return nullptr;
+    }
+
+    // Initialize descriptor
+    region->descriptor = static_cast<MetadataOverflowDescriptor*>(region->shm.data());
+    std::memset(region->descriptor, 0, sizeof(MetadataOverflowDescriptor));
+
+    region->descriptor->magic = OVERFLOW_MAGIC;
+    region->descriptor->region_id = region->id;
+    region->descriptor->next_region_id.store(0, std::memory_order_release);
+
+    // Object entries section
+    region->descriptor->object_entry_offset = static_cast<uint32_t>(header_size);
+    region->descriptor->object_entry_capacity = object_capacity;
+    region->descriptor->object_entry_count.store(0, std::memory_order_release);
+
+    // Type entries section
+    region->descriptor->type_entry_offset = static_cast<uint32_t>(header_size + object_size);
+    region->descriptor->type_entry_capacity = type_capacity;
+    region->descriptor->type_entry_count.store(0, std::memory_order_release);
+
+    // Field entries section
+    region->descriptor->field_entry_offset = static_cast<uint32_t>(header_size + object_size + type_size);
+    region->descriptor->field_entry_capacity = field_capacity;
+    region->descriptor->field_entry_count.store(0, std::memory_order_release);
+
+    region->descriptor->set_shm_name(shm_name);
+
+    // Link to previous overflow region if exists
+    if (!overflow_regions_.empty()) {
+        overflow_regions_.back()->descriptor->next_region_id.store(
+            region->id, std::memory_order_release);
+    } else {
+        // First overflow region - link from header
+        ctx_.header()->first_overflow_region_id.store(region->id, std::memory_order_release);
+    }
+
+    OverflowRegion* ptr = region.get();
+    overflow_regions_.push_back(std::move(region));
+
+    // Increment sequence for observers to detect new region
+    ctx_.header()->sequence.fetch_add(1, std::memory_order_release);
+
+    return ptr;
+}
+
+MetadataManager::OverflowRegion* MetadataManager::current_overflow_region() {
+    if (overflow_regions_.empty()) return nullptr;
+    return overflow_regions_.back().get();
+}
+
+ObjectEntry* MetadataManager::allocate_object_entry() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    TelemetryHeader* header = ctx_.header();
+
+    // First try to allocate from header
+    uint32_t count = header->object_count.load(std::memory_order_acquire);
+    if (count < header->object_dir_capacity) {
+        auto* entries = reinterpret_cast<ObjectEntry*>(
+            static_cast<char*>(ctx_.header_shm().data()) + header->object_dir_offset);
+        header->object_count.store(count + 1, std::memory_order_release);
+        return &entries[count];
+    }
+
+    // Header full - try overflow regions
+    OverflowRegion* region = current_overflow_region();
+    if (region) {
+        uint32_t overflow_count = region->descriptor->object_entry_count.load(std::memory_order_acquire);
+        if (overflow_count < region->descriptor->object_entry_capacity) {
+            auto* entries = reinterpret_cast<ObjectEntry*>(
+                static_cast<char*>(region->shm.data()) + region->descriptor->object_entry_offset);
+            region->descriptor->object_entry_count.store(overflow_count + 1, std::memory_order_release);
+            return &entries[overflow_count];
+        }
+    }
+
+    // Need new overflow region
+    region = create_overflow_region();
+    if (!region) return nullptr;
+
+    auto* entries = reinterpret_cast<ObjectEntry*>(
+        static_cast<char*>(region->shm.data()) + region->descriptor->object_entry_offset);
+    region->descriptor->object_entry_count.store(1, std::memory_order_release);
+    return &entries[0];
+}
+
+TypeEntry* MetadataManager::allocate_type_entry() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    TelemetryHeader* header = ctx_.header();
+
+    // First try to allocate from header
+    uint32_t count = header->type_count.load(std::memory_order_acquire);
+    if (count < header->type_registry_capacity) {
+        auto* entries = reinterpret_cast<TypeEntry*>(
+            static_cast<char*>(ctx_.header_shm().data()) + header->type_registry_offset);
+        header->type_count.store(count + 1, std::memory_order_release);
+        return &entries[count];
+    }
+
+    // Header full - try overflow regions
+    OverflowRegion* region = current_overflow_region();
+    if (region) {
+        uint32_t overflow_count = region->descriptor->type_entry_count.load(std::memory_order_acquire);
+        if (overflow_count < region->descriptor->type_entry_capacity) {
+            auto* entries = reinterpret_cast<TypeEntry*>(
+                static_cast<char*>(region->shm.data()) + region->descriptor->type_entry_offset);
+            region->descriptor->type_entry_count.store(overflow_count + 1, std::memory_order_release);
+            return &entries[overflow_count];
+        }
+    }
+
+    // Need new overflow region
+    region = create_overflow_region();
+    if (!region) return nullptr;
+
+    auto* entries = reinterpret_cast<TypeEntry*>(
+        static_cast<char*>(region->shm.data()) + region->descriptor->type_entry_offset);
+    region->descriptor->type_entry_count.store(1, std::memory_order_release);
+    return &entries[0];
+}
+
+FieldEntry* MetadataManager::allocate_field_entries(uint32_t count) {
+    if (count == 0) return nullptr;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    TelemetryHeader* header = ctx_.header();
+
+    // First try to allocate from header
+    uint32_t current = header->field_count.load(std::memory_order_acquire);
+    if (current + count <= header->field_entries_capacity) {
+        auto* entries = reinterpret_cast<FieldEntry*>(
+            static_cast<char*>(ctx_.header_shm().data()) + header->field_entries_offset);
+        header->field_count.store(current + count, std::memory_order_release);
+        return &entries[current];
+    }
+
+    // Header full - try overflow regions
+    OverflowRegion* region = current_overflow_region();
+    if (region) {
+        uint32_t overflow_count = region->descriptor->field_entry_count.load(std::memory_order_acquire);
+        if (overflow_count + count <= region->descriptor->field_entry_capacity) {
+            auto* entries = reinterpret_cast<FieldEntry*>(
+                static_cast<char*>(region->shm.data()) + region->descriptor->field_entry_offset);
+            region->descriptor->field_entry_count.store(overflow_count + count, std::memory_order_release);
+            return &entries[overflow_count];
+        }
+    }
+
+    // Need new overflow region
+    region = create_overflow_region();
+    if (!region) return nullptr;
+
+    // Check if new region can hold all requested fields
+    if (count > region->descriptor->field_entry_capacity) {
+        return nullptr;  // Request too large for a single region
+    }
+
+    auto* entries = reinterpret_cast<FieldEntry*>(
+        static_cast<char*>(region->shm.data()) + region->descriptor->field_entry_offset);
+    region->descriptor->field_entry_count.store(count, std::memory_order_release);
+    return &entries[0];
+}
+
+uint32_t MetadataManager::total_object_count() const {
+    uint32_t total = ctx_.header()->object_count.load(std::memory_order_acquire);
+    for (const auto& region : overflow_regions_) {
+        total += region->descriptor->object_entry_count.load(std::memory_order_acquire);
+    }
+    return total;
+}
+
+uint32_t MetadataManager::total_type_count() const {
+    uint32_t total = ctx_.header()->type_count.load(std::memory_order_acquire);
+    for (const auto& region : overflow_regions_) {
+        total += region->descriptor->type_entry_count.load(std::memory_order_acquire);
+    }
+    return total;
+}
+
+uint32_t MetadataManager::total_field_count() const {
+    uint32_t total = ctx_.header()->field_count.load(std::memory_order_acquire);
+    for (const auto& region : overflow_regions_) {
+        total += region->descriptor->field_entry_count.load(std::memory_order_acquire);
+    }
+    return total;
+}
+
 // ObjectManager implementation
 
 ObjectManager::ObjectManager(Context& ctx)
@@ -146,23 +378,17 @@ ObjectManager::ObjectManager(Context& ctx)
 ObjectEntry* ObjectManager::register_object(void* ptr, uint32_t type_id, std::string_view label) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    TelemetryHeader* header = ctx_.header();
-    uint32_t count = header->object_count.load(std::memory_order_acquire);
-
-    if (count >= header->object_dir_capacity) {
-        return nullptr;  // Directory full
-    }
-
     // Get location
     uint64_t region_id, offset;
     if (!ctx_.regions().get_location(ptr, region_id, offset)) {
         return nullptr;
     }
 
-    // Get entry slot
-    auto* entries = reinterpret_cast<ObjectEntry*>(
-        static_cast<char*>(ctx_.header_shm().data()) + header->object_dir_offset);
-    ObjectEntry* entry = &entries[count];
+    // Allocate entry via MetadataManager (handles overflow automatically)
+    ObjectEntry* entry = ctx_.metadata().allocate_object_entry();
+    if (!entry) {
+        return nullptr;
+    }
 
     // Initialize entry
     entry->state.store(static_cast<uint32_t>(ObjectState::Alive), std::memory_order_release);
@@ -172,9 +398,8 @@ ObjectEntry* ObjectManager::register_object(void* ptr, uint32_t type_id, std::st
     entry->generation = 1;
     entry->set_label(label);
 
-    // Update count
-    header->object_count.store(count + 1, std::memory_order_release);
-    header->sequence.fetch_add(1, std::memory_order_release);
+    // Increment sequence for observers
+    ctx_.header()->sequence.fetch_add(1, std::memory_order_release);
 
     ptr_to_entry_[ptr] = entry;
 

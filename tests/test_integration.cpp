@@ -281,3 +281,51 @@ TEST_F(IntegrationTest, ConcurrentProducerObserver) {
     EXPECT_EQ(updates, 1000);
     EXPECT_GT(reads, 0);
 }
+
+TEST_F(IntegrationTest, MetadataOverflow) {
+    // Test that creating more objects than initial capacity triggers overflow
+    // and all objects remain observable
+
+    Config cfg;
+    cfg.max_objects = 10;  // Set a small limit to trigger overflow quickly
+
+    ASSERT_TRUE(memglass::init("overflow_test", cfg));
+
+    // Create more objects than the initial capacity
+    const int num_objects = 25;
+    std::vector<SimpleStruct*> objects;
+    objects.reserve(num_objects);
+
+    for (int i = 0; i < num_objects; ++i) {
+        std::string label = "overflow_obj_" + std::to_string(i);
+        auto* obj = memglass::create<SimpleStruct>(label);
+        ASSERT_NE(obj, nullptr) << "Failed to create object " << i;
+        obj->x = i;
+        obj->y = i * 10;
+        obj->value = static_cast<double>(i) * 1.5;
+        objects.push_back(obj);
+    }
+
+    // Observer should see all objects including those in overflow regions
+    Observer observer("overflow_test");
+    ASSERT_TRUE(observer.connect());
+
+    // Verify all objects are observable
+    auto observed_objects = observer.objects();
+    EXPECT_EQ(observed_objects.size(), static_cast<size_t>(num_objects));
+
+    // Verify each object can be found and has correct values
+    for (int i = 0; i < num_objects; ++i) {
+        std::string label = "overflow_obj_" + std::to_string(i);
+        auto view = observer.find(label);
+        ASSERT_TRUE(static_cast<bool>(view)) << "Failed to find object: " << label;
+
+        int32_t x = view["x"].as<int32_t>();
+        int32_t y = view["y"].as<int32_t>();
+        double value = view["value"].as<double>();
+
+        EXPECT_EQ(x, i) << "Incorrect x for object " << i;
+        EXPECT_EQ(y, i * 10) << "Incorrect y for object " << i;
+        EXPECT_NEAR(value, static_cast<double>(i) * 1.5, 0.0001) << "Incorrect value for object " << i;
+    }
+}

@@ -11,6 +11,7 @@ namespace memglass {
 // Magic numbers
 constexpr uint64_t HEADER_MAGIC = 0x4D454D474C415353ULL;  // "MEMGLASS"
 constexpr uint64_t REGION_MAGIC = 0x5245474E4D454D47ULL;  // "REGNMEMG"
+constexpr uint64_t OVERFLOW_MAGIC = 0x4F56464C574D4547ULL; // "OVFLWMEG"
 constexpr uint32_t PROTOCOL_VERSION = 1;
 
 // Primitive type IDs for reflection
@@ -131,6 +132,37 @@ struct RegionDescriptor {
 };
 static_assert(std::is_trivially_copyable_v<RegionDescriptor>);
 
+// Metadata overflow region descriptor - for growable type/field/object storage
+struct MetadataOverflowDescriptor {
+    uint64_t magic;                        // OVERFLOW_MAGIC
+    uint64_t region_id;                    // Unique ID for this overflow region
+    std::atomic<uint64_t> next_region_id;  // Next overflow region, 0 = end of chain
+
+    // Object directory overflow section
+    uint32_t object_entry_offset;          // Offset to ObjectEntry array
+    uint32_t object_entry_capacity;        // Max entries in this region
+    std::atomic<uint32_t> object_entry_count; // Current count
+
+    // Type registry overflow section
+    uint32_t type_entry_offset;            // Offset to TypeEntry array
+    uint32_t type_entry_capacity;          // Max entries in this region
+    std::atomic<uint32_t> type_entry_count; // Current count
+
+    // Field entries overflow section
+    uint32_t field_entry_offset;           // Offset to FieldEntry array
+    uint32_t field_entry_capacity;         // Max entries in this region
+    std::atomic<uint32_t> field_entry_count; // Current count
+
+    char shm_name[64];                     // Shared memory name
+
+    void set_shm_name(std::string_view n) {
+        size_t len = std::min(n.size(), sizeof(shm_name) - 1);
+        std::memcpy(shm_name, n.data(), len);
+        shm_name[len] = '\0';
+    }
+};
+static_assert(std::is_trivially_copyable_v<MetadataOverflowDescriptor>);
+
 struct TelemetryHeader {
     uint64_t magic;                      // HEADER_MAGIC
     uint32_t version;                    // Protocol version
@@ -156,6 +188,9 @@ struct TelemetryHeader {
     // First data region
     std::atomic<uint64_t> first_region_id;
 
+    // First metadata overflow region (for growable metadata)
+    std::atomic<uint64_t> first_overflow_region_id;
+
     char session_name[64];               // Human-readable session identifier
     uint64_t producer_pid;               // Producer process ID
     uint64_t start_timestamp;            // When session started
@@ -166,6 +201,7 @@ static_assert(std::is_trivially_copyable_v<TelemetryHeader>);
 struct Config {
     size_t initial_region_size = 1024 * 1024;       // 1 MB
     size_t max_region_size = 64 * 1024 * 1024;      // 64 MB
+    size_t overflow_region_size = 256 * 1024;       // 256 KB for metadata overflow
     uint32_t max_types = 256;
     uint32_t max_fields = 4096;
     uint32_t max_objects = 4096;

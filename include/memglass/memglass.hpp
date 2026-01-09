@@ -38,6 +38,7 @@ public:
     // Access components
     TelemetryHeader* header() { return header_; }
     RegionManager& regions() { return *regions_; }
+    MetadataManager& metadata() { return *metadata_; }
     ObjectManager& objects() { return *objects_; }
     const Config& config() const { return config_; }
     const std::string& session_name() const { return session_name_; }
@@ -54,6 +55,7 @@ private:
     TelemetryHeader* header_ = nullptr;
 
     std::unique_ptr<RegionManager> regions_;
+    std::unique_ptr<MetadataManager> metadata_;
     std::unique_ptr<ObjectManager> objects_;
 };
 

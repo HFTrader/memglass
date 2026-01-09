@@ -1504,7 +1504,10 @@ int main() {
 - Optional: Boost.Interprocess (alternative allocator backend)
 
 **memglass-gen:**
-- libclang (LLVM/Clang development libraries)
+- libclang 12+ (LLVM/Clang development libraries)
+  - Minimum: Clang/LLVM 12 (matches C++20 compiler requirement)
+  - Recommended: Clang/LLVM 14+ (improved C++20 AST handling)
+  - Required packages: `libclang-dev` (Debian/Ubuntu), `clang-devel` (Fedora), `llvm` (macOS Homebrew)
 
 **memglass-view:**
 - ncurses (ncursesw for wide character support)

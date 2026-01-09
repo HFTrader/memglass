@@ -334,6 +334,39 @@ int main() {
     }
 ```
 
+### Writing Object State
+
+The observer can also write values back to shared memory:
+
+```cpp
+    auto player_view = observer.find("player_1");
+    if (player_view) {
+        // Write individual fields
+        player_view.write<float>("health", 100.0f);
+        player_view.write<bool>("is_active", true);
+
+        // Write nested field using dot notation
+        player_view.write<float>("position.x", 10.0f);
+
+        // Write entire nested struct
+        Vec3 new_pos{1.0f, 2.0f, 3.0f};
+        player_view.write("position", new_pos);
+
+        // Write to array element
+        player_view.write<float>("scores[0]", 150.0f);
+
+        // Mutable raw pointer (use with caution)
+        void* raw = player_view.mutable_data();
+    }
+```
+
+**Write Safety:**
+
+- Writes are not atomic for multi-byte types by default
+- Use `std::atomic<T>` fields or `Guarded<T>` for safe concurrent modification
+- Observer writes while producer is also writing may cause data races
+- Consider producer-side locking if bidirectional modification is required
+
 ### Watching for Changes
 
 ```cpp
@@ -503,6 +536,7 @@ The `memglass-gen` tool uses libclang to parse C++ headers and extract struct la
 4. **Offset computation** - Uses clang's layout info for accurate offsets
 5. **Array support** - Detects `T[N]` and `std::array<T,N>`
 6. **Namespace preservation** - Generates fully qualified names
+7. **Comment metadata extraction** - Parses inline comments for field annotations
 
 ### CMake Integration
 
@@ -565,6 +599,107 @@ Key libclang functions used:
 - `clang_Cursor_hasAttrs()` - Check for attributes
 - `clang_Type_getSizeOf()` - Get type sizes
 - `clang_Type_getOffsetOf()` - Get field offsets
+- `clang_Cursor_getRawCommentText()` - Extract inline comments for metadata
+
+### Field Metadata via Comments
+
+Inline comments on struct fields can contain annotations that memglass-gen extracts for use by memglass-view. This enables validation, formatting hints, and editing constraints without additional boilerplate.
+
+**Syntax:**
+
+```cpp
+struct [[memglass::observe]] Player {
+    uint32_t id;              // @readonly
+    Vec3 position;            // @range(-1000.0, 1000.0)
+    float health;             // @range(0, 100) @format("%.1f HP")
+    float speed;              // @min(0) @max(500) @step(0.5)
+    char name[32];            // @regex("[A-Za-z0-9_]{3,20}")
+    uint32_t state;           // @enum(IDLE=0, RUNNING=1, JUMPING=2, DEAD=3)
+    uint32_t flags;           // @flags(INVINCIBLE=1, INVISIBLE=2, FROZEN=4)
+    int32_t score;            // @readonly @format("%+d")
+};
+```
+
+**Supported Annotations:**
+
+| Annotation | Description | Example |
+|------------|-------------|---------|
+| `@readonly` | Field cannot be modified via memglass-view | `// @readonly` |
+| `@range(min, max)` | Numeric bounds for validation | `// @range(0, 100)` |
+| `@min(val)` | Minimum value only | `// @min(0)` |
+| `@max(val)` | Maximum value only | `// @max(1000)` |
+| `@step(val)` | Increment step for +/- adjustment | `// @step(0.1)` |
+| `@regex(pattern)` | Regex validation for strings | `// @regex("[a-z]+")` |
+| `@enum(name=val,...)` | Named values for integers | `// @enum(OFF=0, ON=1)` |
+| `@flags(name=bit,...)` | Bitfield with named flags | `// @flags(A=1, B=2, C=4)` |
+| `@format(fmt)` | printf-style display format | `// @format("%.2f")` |
+| `@unit(str)` | Display unit suffix | `// @unit("m/s")` |
+| `@desc(str)` | Description tooltip | `// @desc("Player health points")` |
+
+**Generated Metadata:**
+
+```cpp
+// memglass_generated.hpp (excerpt)
+template<> struct TypeDescriptor<Player> {
+    // ... fields array ...
+
+    static constexpr std::array<FieldMeta, 8> metadata = {{
+        {.readonly = true},                                           // id
+        {.range = {-1000.0, 1000.0}},                                 // position
+        {.range = {0, 100}, .format = "%.1f HP"},                     // health
+        {.range = {0, 500}, .step = 0.5},                             // speed
+        {.regex = "[A-Za-z0-9_]{3,20}"},                              // name
+        {.enum_values = {{"IDLE",0},{"RUNNING",1},{"JUMPING",2},{"DEAD",3}}}, // state
+        {.flags = {{"INVINCIBLE",1},{"INVISIBLE",2},{"FROZEN",4}}},   // flags
+        {.readonly = true, .format = "%+d"},                          // score
+    }};
+};
+```
+
+**Comment Parsing Implementation:**
+
+```cpp
+FieldMeta parse_field_comment(CXCursor field_cursor) {
+    FieldMeta meta{};
+
+    CXString comment = clang_Cursor_getRawCommentText(field_cursor);
+    const char* text = clang_getCString(comment);
+    if (!text) return meta;
+
+    std::string_view sv(text);
+
+    // Parse @readonly
+    if (sv.find("@readonly") != std::string_view::npos) {
+        meta.readonly = true;
+    }
+
+    // Parse @range(min, max)
+    static const std::regex range_re(R"(@range\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\))");
+    std::smatch match;
+    std::string str(sv);
+    if (std::regex_search(str, match, range_re)) {
+        meta.range_min = std::stod(match[1]);
+        meta.range_max = std::stod(match[2]);
+        meta.has_range = true;
+    }
+
+    // Parse @regex(pattern)
+    static const std::regex regex_re(R"(@regex\s*\(\s*"([^"]+)"\s*\))");
+    if (std::regex_search(str, match, regex_re)) {
+        meta.regex_pattern = match[1];
+    }
+
+    // Parse @enum(NAME=val, ...)
+    static const std::regex enum_re(R"(@enum\s*\(([^)]+)\))");
+    if (std::regex_search(str, match, enum_re)) {
+        meta.enum_values = parse_enum_list(match[1]);
+    }
+
+    // ... similar for @flags, @format, @step, etc.
+
+    clang_disposeString(comment);
+    return meta;
+}
 
 ## memglass-view: ncurses Memory Visualizer
 
@@ -608,20 +743,26 @@ An interactive terminal-based tool for real-time visualization of shared memory 
 6. **Search/Filter** - Find objects by label or type (press `/` or `f`)
 7. **Watch List** - Pin specific fields to always-visible panel
 8. **Change Highlighting** - Flash values that changed since last frame
+9. **Field Editing** - Modify values directly with validation from metadata
+10. **Enum/Flags Picker** - Visual selector for annotated enum and bitfield types
 
 ### Keyboard Controls
 
 | Key | Action |
 |-----|--------|
-| `↑/↓` or `j/k` | Navigate object list |
-| `Enter` | Expand/collapse nested struct |
+| `↑/↓` or `j/k` | Navigate object/field list |
+| `←/→` or `h/l` | Navigate between panels |
+| `Enter` | Expand/collapse nested struct, or edit field |
+| `e` | Edit selected field (opens input dialog) |
 | `Tab` | Switch focus between panels |
 | `h` | Toggle hex view for selected object |
 | `w` | Add field to watch list |
 | `f` | Filter objects by type |
 | `/` | Search objects by label |
 | `r` | Force refresh |
-| `+/-` | Increase/decrease refresh rate |
+| `+/-` | Adjust numeric field value by step (or refresh rate in list) |
+| `Space` | Toggle bool field, or cycle enum values |
+| `Esc` | Cancel edit, close dialog |
 | `q` | Quit |
 
 ### Command Line Usage
@@ -723,6 +864,132 @@ memglass-view --highlight-frames 30 game_server
 memglass-view --no-highlight game_server
 ```
 
+### Field Editing
+
+memglass-view can write values directly to shared memory. Editing respects metadata annotations.
+
+**Edit Modes by Type:**
+
+| Type | Edit Behavior |
+|------|---------------|
+| `bool` | Space toggles, or type `true`/`false`/`0`/`1` |
+| `int/uint` | Direct input, +/- adjusts by step (default 1) |
+| `float/double` | Direct input, +/- adjusts by step (default 0.1) |
+| `char[N]` | Text input with length limit, regex validation |
+| `@enum` | Dropdown picker or cycle with Space |
+| `@flags` | Checkbox list, toggle individual bits |
+
+**Edit Dialog (mockup):**
+
+```
+┌─ Edit: player_1.health ─────────────────────┐
+│                                             │
+│  Type:   float                              │
+│  Range:  0 - 100                            │
+│  Step:   0.5                                │
+│                                             │
+│  Current: 87.5                              │
+│  New:     [85.0_____________]               │
+│                                             │
+│  [Enter] Apply  [Esc] Cancel  [+/-] Adjust  │
+└─────────────────────────────────────────────┘
+```
+
+**Enum Picker:**
+
+```
+┌─ Edit: player_1.state ──────────────────────┐
+│                                             │
+│  ○ IDLE      (0)                            │
+│  ● RUNNING   (1)  ← current                 │
+│  ○ JUMPING   (2)                            │
+│  ○ DEAD      (3)                            │
+│                                             │
+│  [Enter] Select  [Esc] Cancel               │
+└─────────────────────────────────────────────┘
+```
+
+**Flags Editor:**
+
+```
+┌─ Edit: player_1.flags ──────────────────────┐
+│                                             │
+│  [x] INVINCIBLE  (bit 0)                    │
+│  [ ] INVISIBLE   (bit 1)                    │
+│  [x] FROZEN      (bit 2)                    │
+│                                             │
+│  Value: 5 (0x05)                            │
+│                                             │
+│  [Space] Toggle  [Enter] Done  [Esc] Cancel │
+└─────────────────────────────────────────────┘
+```
+
+**Validation:**
+
+- `@readonly` fields show "Read-only" and reject edits
+- `@range` validates before applying; shows error if out of bounds
+- `@regex` validates string input; shows pattern on mismatch
+- Invalid input highlights the field in red
+
+**Write Implementation:**
+
+```cpp
+class FieldEditor {
+    memglass::Observer& observer_;
+    const FieldMeta& meta_;
+
+public:
+    bool write_value(ObjectView& obj, const std::string& field_path,
+                     const std::string& input) {
+        if (meta_.readonly) {
+            show_error("Field is read-only");
+            return false;
+        }
+
+        // Parse and validate based on type
+        auto value = parse_input(input, field_info_.type);
+        if (!value) {
+            show_error("Invalid input format");
+            return false;
+        }
+
+        // Check range constraints
+        if (meta_.has_range) {
+            double v = std::get<double>(*value);
+            if (v < meta_.range_min || v > meta_.range_max) {
+                show_error(fmt::format("Value must be in range [{}, {}]",
+                                       meta_.range_min, meta_.range_max));
+                return false;
+            }
+        }
+
+        // Check regex for strings
+        if (!meta_.regex_pattern.empty()) {
+            std::regex re(meta_.regex_pattern);
+            if (!std::regex_match(std::get<std::string>(*value), re)) {
+                show_error(fmt::format("Must match pattern: {}",
+                                       meta_.regex_pattern));
+                return false;
+            }
+        }
+
+        // Write to shared memory
+        obj.write(field_path, *value);
+        return true;
+    }
+};
+```
+
+**Command Line Options:**
+
+```bash
+# Read-only mode (disable editing)
+memglass-view --readonly game_server
+
+# Allow editing (default)
+memglass-view --edit game_server
+```
+
 ## File Structure
 
 ```
@@ -761,11 +1028,16 @@ memglass/
 │       ├── app.hpp            # Application state
 │       ├── app.cpp            # Main loop, input handling
 │       ├── ui/
-│       │   ├── layout.hpp     # Window layout management
+│       │   ├── layout.hpp         # Window layout management
 │       │   ├── object_list.cpp    # Object browser panel
 │       │   ├── object_detail.cpp  # Field inspector panel
 │       │   ├── memory_map.cpp     # Region visualization
-│       │   └── hex_view.cpp       # Raw memory hex dump
+│       │   ├── hex_view.cpp       # Raw memory hex dump
+│       │   ├── edit_dialog.cpp    # Field edit dialog
+│       │   ├── enum_picker.cpp    # Enum value selector
+│       │   └── flags_editor.cpp   # Bitfield checkbox editor
+│       ├── editor.hpp         # Field editing logic
+│       ├── editor.cpp         # Validation, write operations
 │       └── format.cpp         # Value formatting utilities
 ├── cmake/
 │   ├── FindLibClang.cmake

@@ -11,7 +11,7 @@ A C++20 library for real-time cross-process observation of C++ POD object state 
 1. **Non-invasive observation** - Observer reads memory without affecting producer performance
 2. **Dynamic growth** - No fixed memory limit; regions allocated on demand
 3. **Type-aware introspection** - Observer understands field names, types, and structure
-4. **Minimal boilerplate** - Simple macros/templates for registration
+4. **Zero boilerplate** - Automatic reflection via clang tooling, no macros needed
 5. **Zero-copy** - Observer reads directly from shared memory, no serialization
 
 ## Architecture
@@ -180,35 +180,68 @@ int main() {
 }
 ```
 
-### Type Registration (Macro Approach)
+### Type Registration (Automatic via Clang Tooling)
+
+Simply mark your structs with an attribute - no macros, no manual field listing:
 
 ```cpp
-struct Vec3 {
+// game_types.hpp
+struct [[memglass::observe]] Vec3 {
     float x, y, z;
 };
-MEMGLASS_REGISTER(Vec3, x, y, z);
 
-struct Player {
+struct [[memglass::observe]] Player {
     uint32_t id;
     Vec3 position;
     Vec3 velocity;
     float health;
     bool is_active;
 };
-MEMGLASS_REGISTER(Player, id, position, velocity, health, is_active);
 ```
 
-The macro expands to compile-time reflection data:
+The `memglass-gen` tool (a clang-based code generator) parses your headers and automatically generates all reflection data:
+
+```bash
+# Run at build time (integrated into CMake)
+memglass-gen --output=memglass_generated.hpp include/game_types.hpp
+```
+
+This generates type descriptors with full field information extracted from clang's AST:
 
 ```cpp
-#define MEMGLASS_REGISTER(Type, ...) \
-    template<> struct memglass::TypeDescriptor<Type> { \
-        static constexpr auto name = #Type; \
-        static constexpr auto fields = std::make_tuple( \
-            MEMGLASS_FIELD_ENTRIES(__VA_ARGS__) \
-        ); \
-        static void register_type() { /* ... */ } \
-    };
+// memglass_generated.hpp (auto-generated, do not edit)
+namespace memglass::generated {
+
+template<> struct TypeDescriptor<Vec3> {
+    static constexpr std::string_view name = "Vec3";
+    static constexpr size_t size = 12;
+    static constexpr size_t alignment = 4;
+    static constexpr std::array<FieldInfo, 3> fields = {{
+        {"x", offsetof(Vec3, x), sizeof(float), PrimitiveType::Float32, 0},
+        {"y", offsetof(Vec3, y), sizeof(float), PrimitiveType::Float32, 0},
+        {"z", offsetof(Vec3, z), sizeof(float), PrimitiveType::Float32, 0},
+    }};
+};
+
+template<> struct TypeDescriptor<Player> {
+    static constexpr std::string_view name = "Player";
+    static constexpr size_t size = 28;
+    static constexpr size_t alignment = 4;
+    static constexpr std::array<FieldInfo, 5> fields = {{
+        {"id", offsetof(Player, id), sizeof(uint32_t), PrimitiveType::UInt32, 0},
+        {"position", offsetof(Player, position), sizeof(Vec3), TypeId<Vec3>, 0},
+        {"velocity", offsetof(Player, velocity), sizeof(Vec3), TypeId<Vec3>, 0},
+        {"health", offsetof(Player, health), sizeof(float), PrimitiveType::Float32, 0},
+        {"is_active", offsetof(Player, is_active), sizeof(bool), PrimitiveType::Bool, 0},
+    }};
+};
+
+inline void register_all_types() {
+    memglass::registry::add<Vec3>();
+    memglass::registry::add<Player>();
+}
+
+} // namespace memglass::generated
 ```
 
 ### Object Allocation
@@ -438,6 +471,101 @@ memglass::shutdown();
 // 3. Unlink shared memory regions
 ```
 
+## memglass-gen: Clang-Based Code Generator
+
+The `memglass-gen` tool uses libclang to parse C++ headers and extract struct layouts automatically.
+
+### How It Works
+
+```
+┌──────────────┐     ┌─────────────┐     ┌───────────────────┐
+│ game_types.h │────▶│ memglass-gen│────▶│ memglass_generated│
+│              │     │ (libclang)  │     │ .hpp              │
+└──────────────┘     └─────────────┘     └───────────────────┘
+       │                    │                      │
+       │                    ▼                      │
+       │            ┌─────────────┐                │
+       │            │ Parse AST   │                │
+       │            │ Find [[memglass::observe]]   │
+       │            │ Extract fields│              │
+       │            │ Compute offsets│             │
+       │            └─────────────┘                │
+       │                                           │
+       └───────────────────────────────────────────┘
+                    Compile together
+```
+
+### Generator Features
+
+1. **Attribute detection** - Finds structs marked `[[memglass::observe]]`
+2. **Recursive type resolution** - Handles nested structs automatically
+3. **POD validation** - Warns/errors on non-trivially-copyable types
+4. **Offset computation** - Uses clang's layout info for accurate offsets
+5. **Array support** - Detects `T[N]` and `std::array<T,N>`
+6. **Namespace preservation** - Generates fully qualified names
+
+### CMake Integration
+
+```cmake
+find_package(memglass REQUIRED)
+
+# Automatically generate reflection code for your headers
+memglass_generate(
+    TARGET my_game
+    HEADERS
+        include/game_types.hpp
+        include/player.hpp
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/memglass_generated.hpp
+)
+
+target_link_libraries(my_game PRIVATE memglass::memglass)
+```
+
+### Command Line Usage
+
+```bash
+# Basic usage
+memglass-gen -o memglass_generated.hpp input.hpp
+
+# With include paths
+memglass-gen -I/usr/include -I./include -o out.hpp src/*.hpp
+
+# Verbose mode (shows discovered types)
+memglass-gen -v -o out.hpp input.hpp
+
+# Dry run (parse only, no output)
+memglass-gen --dry-run input.hpp
+```
+
+### Generator Implementation
+
+The generator is built using libclang's C API (~600 lines):
+
+```cpp
+// Simplified structure of memglass-gen
+class MemglassGenerator {
+    CXIndex index_;
+    std::vector<TypeInfo> discovered_types_;
+
+public:
+    void parse(const std::string& filename,
+               const std::vector<std::string>& args);
+    void visit_cursor(CXCursor cursor);
+    bool has_memglass_attribute(CXCursor cursor);
+    TypeInfo extract_struct_info(CXCursor cursor);
+    FieldInfo extract_field_info(CXCursor field);
+    void emit_header(std::ostream& out);
+};
+```
+
+Key libclang functions used:
+- `clang_parseTranslationUnit()` - Parse the source file
+- `clang_visitChildren()` - Walk the AST
+- `clang_getCursorKind()` - Identify structs/classes
+- `clang_Cursor_hasAttrs()` - Check for attributes
+- `clang_Type_getSizeOf()` - Get type sizes
+- `clang_Type_getOffsetOf()` - Get field offsets
+
 ## File Structure
 
 ```
@@ -445,11 +573,12 @@ memglass/
 ├── CMakeLists.txt
 ├── include/
 │   └── memglass/
-│       ├── memglass.hpp      # Main producer header
+│       ├── memglass.hpp       # Main producer header
 │       ├── observer.hpp       # Observer header
 │       ├── allocator.hpp      # Shared memory allocator
-│       ├── registry.hpp       # Type registration
+│       ├── registry.hpp       # Type registration (runtime)
 │       ├── types.hpp          # Common types, primitives
+│       ├── attribute.hpp      # [[memglass::observe]] definition
 │       └── detail/
 │           ├── shm.hpp        # Platform shared memory abstraction
 │           ├── region.hpp     # Region management
@@ -462,12 +591,28 @@ memglass/
 │   └── platform/
 │       ├── shm_posix.cpp
 │       └── shm_windows.cpp
+├── tools/
+│   └── memglass-gen/
+│       ├── CMakeLists.txt     # Links against libclang
+│       ├── main.cpp           # CLI entry point
+│       ├── generator.hpp      # Generator class
+│       ├── generator.cpp      # AST traversal, code emission
+│       └── type_mapper.cpp    # C++ type to PrimitiveType mapping
+├── cmake/
+│   ├── FindLibClang.cmake
+│   └── MemglassGenerate.cmake # memglass_generate() function
 ├── examples/
-│   ├── producer.cpp           # Example producer application
-│   └── observer_cli.cpp       # Command-line observer
+│   ├── producer/
+│   │   ├── CMakeLists.txt
+│   │   ├── game_types.hpp     # Structs with [[memglass::observe]]
+│   │   └── producer.cpp
+│   └── observer/
+│       ├── CMakeLists.txt
+│       └── observer_cli.cpp
 └── tests/
     ├── test_allocator.cpp
     ├── test_registry.cpp
+    ├── test_generator.cpp     # Tests for memglass-gen
     └── test_integration.cpp
 ```
 
@@ -476,24 +621,35 @@ memglass/
 ### Producer (Game Server)
 
 ```cpp
-#include <memglass/memglass.hpp>
-#include <thread>
-#include <cmath>
+// game_types.hpp
+#pragma once
+#include <cstdint>
+#include <atomic>
 
-struct Vec3 { float x, y, z; };
-MEMGLASS_REGISTER(Vec3, x, y, z);
+struct [[memglass::observe]] Vec3 {
+    float x, y, z;
+};
 
-struct Entity {
+struct [[memglass::observe]] Entity {
     uint32_t id;
     Vec3 position;
     Vec3 velocity;
     float health;
     std::atomic<bool> is_active;
 };
-MEMGLASS_REGISTER(Entity, id, position, velocity, health, is_active);
+```
+
+```cpp
+// producer.cpp
+#include <memglass/memglass.hpp>
+#include "game_types.hpp"
+#include "memglass_generated.hpp"  // Auto-generated by memglass-gen
+#include <thread>
+#include <cmath>
 
 int main() {
     memglass::init("game_server");
+    memglass::generated::register_all_types();  // Register discovered types
 
     // Create some entities
     std::vector<Entity*> entities;

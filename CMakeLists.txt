@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MEMGLASS_BUILD_EXAMPLES "Build examples" ON)
 option(MEMGLASS_BUILD_TESTS "Build tests" ON)
 option(MEMGLASS_BUILD_GENERATOR "Build memglass-gen tool" ON)
+option(MEMGLASS_BUILD_WEB "Build memglass with web server support" ON)
 
 # Find dependencies
 find_package(fmt QUIET)
@@ -19,6 +20,20 @@ if(NOT fmt_FOUND)
         GIT_TAG 10.2.1
     )
     FetchContent_MakeAvailable(fmt)
+endif()
+
+# cpp-httplib for web server support
+if(MEMGLASS_BUILD_WEB)
+    find_package(httplib QUIET)
+    if(NOT httplib_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(
+            httplib
+            GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+            GIT_TAG v0.15.3
+        )
+        FetchContent_MakeAvailable(httplib)
+    endif()
 endif()
 
 # Core library
@@ -49,6 +64,10 @@ target_compile_features(memglass PUBLIC cxx_std_20)
 # memglass CLI tool (generic observer/visualizer)
 add_executable(memglass-cli tools/memglass.cpp)
 target_link_libraries(memglass-cli PRIVATE memglass)
+if(MEMGLASS_BUILD_WEB)
+    target_link_libraries(memglass-cli PRIVATE httplib::httplib)
+    target_compile_definitions(memglass-cli PRIVATE MEMGLASS_WEB_ENABLED)
+endif()
 set_target_properties(memglass-cli PROPERTIES OUTPUT_NAME memglass)
 
 # memglass-gen tool

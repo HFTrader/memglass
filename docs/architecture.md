@@ -15,20 +15,20 @@ memglass enables real-time cross-process observation of C++ POD objects through 
 ┌─────────────────────────────────────────────────────────────────┐
 │                        PRODUCER PROCESS                         │
 │                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │ User Code   │───▶│ memglass    │───▶│ Shared      │         │
-│  │ MyClass obj │    │ Allocator   │    │ Memory      │         │
-│  └─────────────┘    └─────────────┘    │ Regions     │         │
-│                                        └──────┬──────┘         │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │ User Code   │───▶│ memglass    │───▶│ Shared      │          │
+│  │ MyClass obj │    │ Allocator   │    │ Memory      │          │
+│  └─────────────┘    └─────────────┘    │ Regions     │          │
+│                                        └──────┬──────┘          │
 └───────────────────────────────────────────────┼─────────────────┘
                                                 │
                         ┌───────────────────────┴───────────────┐
                         │         SHARED MEMORY (shm)           │
                         │                                       │
-                        │  ┌─────────┐   ┌─────────┐           │
-                        │  │ Header  │──▶│ Region  │──▶ ...    │
-                        │  │ Region  │   │ 2       │           │
-                        │  └─────────┘   └─────────┘           │
+                        │  ┌─────────┐   ┌─────────┐            │
+                        │  │ Header  │──▶│ Region  │──▶ ...     │
+                        │  │ Region  │   │ 2       │            │
+                        │  └─────────┘   └─────────┘            │
                         │                                       │
                         │  • Type Registry (schemas)            │
                         │  • Object Directory (instances)       │
@@ -38,10 +38,10 @@ memglass enables real-time cross-process observation of C++ POD objects through 
 ┌───────────────────────────────────────────────┼─────────────────┐
 │                       OBSERVER PROCESS        │                 │
 │                                               ▼                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌──────┴──────┐         │
-│  │ UI / CLI   │◀───│ memglass    │◀───│ Memory      │         │
-│  │ Dashboard   │    │ Observer    │    │ Mapped View │         │
-│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│  ┌─────────────┐    ┌─────────────┐    ┌──────┴──────┐          │
+│  │ UI / CLI    │◀───│ memglass    │◀───│ Memory      │          │
+│  │ Dashboard   │    │ Observer    │    │ Mapped View │          │
+│  └─────────────┘    └─────────────┘    └─────────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -449,7 +449,7 @@ memglass/
 │   └── platform/
 │       └── shm_posix.cpp  # POSIX shm implementation
 ├── tools/
-│   ├── memglass.cpp       # TUI observer
+│   ├── memglass.cpp       # TUI/Web observer (see memglass CLI Tool below)
 │   └── memglass-gen/      # Code generator
 │       ├── main.cpp
 │       ├── generator.hpp
@@ -464,3 +464,163 @@ memglass/
     ├── test_seqlock.cpp
     └── test_integration.cpp
 ```
+
+---
+
+## memglass CLI Tool
+
+The `memglass` command-line tool provides interactive observation of any memglass session. It supports two modes of operation: a terminal-based TUI and a web-based browser.
+
+### Usage
+
+```bash
+memglass [OPTIONS] <session_name>
+
+Options:
+  -h, --help           Show help message
+  -w, --web [PORT]     Run as web server (default port: 8080)
+```
+
+### TUI Mode (Default)
+
+When run without flags, memglass presents an interactive terminal UI:
+
+```
+=== Memglass Browser ===
+PID: 12345  Objects: 3  Seq: 42  t:12345
+--------------------------------------------------------------------------------
+[-] AAPL (Security)
+      id                           =              1
+  [-] quote
+        bid_price                  =         150.25 [atomic]
+        ask_price                  =         150.30 [atomic]
+        bid_size                   =            100
+        ask_size                   =            200
+[+] GOOGL (Security)
+[+] MSFT (Security)
+--------------------------------------------------------------------------------
+h/? for help | q to quit
+```
+
+**Controls:**
+- `Up/Down` or `j/k` - Navigate
+- `Enter` or `Space` - Expand/collapse object or field group
+- `r` - Refresh object list
+- `h` or `?` - Toggle help
+- `q` - Quit
+
+The display auto-refreshes every 500ms to show live field values.
+
+### Web Server Mode
+
+With the `-w` or `--web` flag, memglass starts an HTTP server that serves a browser-based UI:
+
+```bash
+# Start on default port 8080
+memglass --web trading
+
+# Start on custom port
+memglass --web 9000 trading
+```
+
+Then open `http://localhost:8080` in any modern browser.
+
+**Features:**
+- Dark-themed responsive UI
+- Expandable/collapsible tree view for objects and nested field groups
+- Auto-refresh toggle (500ms interval)
+- Value change highlighting with flash animation
+- Atomicity badges showing synchronization level (atomic, seqlock, locked)
+- Expand All / Collapse All buttons
+- Live connection status indicator
+- Session info display (PID, object count, sequence number)
+
+### Architecture
+
+The web server is built with [cpp-httplib](https://github.com/yhirose/cpp-httplib), a header-only HTTP library.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           BROWSER                                   │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  JavaScript UI                                                │  │
+│  │  - Fetches /api/data every 500ms                              │  │
+│  │  - Renders dynamic tree with expand/collapse                  │  │
+│  │  - Highlights changed values                                  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ HTTP
+┌──────────────────────────────▼──────────────────────────────────────┐
+│                      memglass --web                                 │
+│                                                                     │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐              │
+│  │ HTTP Server │◀───│ WebServer   │◀───│ Observer    │              │
+│  │ (httplib)   │    │ Class       │    │ API         │              │
+│  └─────────────┘    └─────────────┘    └──────┬──────┘              │
+│                                               │                     │
+│  Endpoints:                                   │                     │
+│  GET /         → Embedded HTML/JS/CSS         │                     │
+│  GET /api/data → JSON snapshot                │                     │
+└───────────────────────────────────────────────┼─────────────────────┘
+                                                │
+                         ┌──────────────────────▼─────────────────────┐
+                         │            SHARED MEMORY                   │
+                         │   memglass_{session}_header                │
+                         │   memglass_{session}_region_*              │
+                         └────────────────────────────────────────────┘
+```
+
+### JSON API
+
+The `/api/data` endpoint returns a JSON snapshot of the session:
+
+```json
+{
+  "pid": 12345,
+  "sequence": 42,
+  "types": [
+    {
+      "name": "Security",
+      "type_id": 65537,
+      "size": 128,
+      "field_count": 8
+    }
+  ],
+  "objects": [
+    {
+      "label": "AAPL",
+      "type_name": "Security",
+      "type_id": 65537,
+      "fields": [
+        {
+          "name": "id",
+          "value": 1,
+          "atomicity": "none"
+        },
+        {
+          "name": "quote.bid_price",
+          "value": 150.25,
+          "atomicity": "atomic"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Build Configuration
+
+The web server support is controlled by the `MEMGLASS_BUILD_WEB` CMake option:
+
+```cmake
+option(MEMGLASS_BUILD_WEB "Build memglass with web server support" ON)
+```
+
+To build without web support (reduces dependencies):
+
+```bash
+cmake -DMEMGLASS_BUILD_WEB=OFF ..
+```
+
+When web support is disabled, the `--web` option is not available and the binary size is smaller.

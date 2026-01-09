@@ -148,7 +148,27 @@ h/? for help | q to quit
 - `q` - Quit
 - `h` or `?` - Toggle help
 
-## Step 5: Write a Custom Observer (Optional)
+## Step 5: Or Use the Web UI
+
+For a browser-based view, start the web server:
+
+```bash
+./build/memglass --web my_app
+```
+
+Then open http://localhost:8080 in your browser. The web UI provides:
+- Auto-refresh with value change highlighting
+- Expandable/collapsible tree view
+- Atomicity badges (atomic, seqlock, locked)
+- Dark theme optimized for monitoring
+
+You can also specify a custom port:
+
+```bash
+./build/memglass --web 9000 my_app
+```
+
+## Step 6: Write a Custom Observer (Optional)
 
 For programmatic access:
 

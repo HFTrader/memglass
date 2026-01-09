@@ -123,7 +123,24 @@ PID: 12345  Objects: 5  Seq: 5
 
 **Controls:** ↑/↓ or j/k to navigate, Enter/Space to expand/collapse, q to quit
 
-### 5. Or write a custom observer
+### 5. Or use the Web UI
+
+```bash
+./build/memglass --web trading_engine
+# Then open http://localhost:8080
+```
+
+<p align="center">
+  <img src="demo-web.gif" alt="memglass Web UI demo">
+</p>
+
+The web interface provides the same tree view with:
+- Auto-refresh with value change highlighting
+- Expand/collapse all buttons
+- Atomicity badges (atomic, seqlock, locked)
+- Dark theme optimized for monitoring
+
+### 6. Or write a custom observer
 
 ```cpp
 #include <memglass/observer.hpp>
@@ -183,7 +200,7 @@ struct Data {
 │   └── ...
 ├── src/                  # Library implementation
 ├── tools/
-│   ├── memglass.cpp      # Interactive TUI observer
+│   ├── memglass.cpp      # TUI and Web observer (--web flag)
 │   └── memglass-gen/     # Code generator
 ├── examples/             # Trading example
 ├── docs/                 # Documentation

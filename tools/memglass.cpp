@@ -1,6 +1,7 @@
 // Generic interactive observer - works with any memglass session
 // Tree-based browser with expandable/collapsible hierarchy
 // Supports nested structs via field name prefixes (e.g., "quote.bid_price")
+// Optional web server mode for browser-based viewing
 #include <memglass/observer.hpp>
 
 #include <fmt/format.h>
@@ -10,12 +11,20 @@
 #include <sys/select.h>
 #include <csignal>
 #include <chrono>
+#include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <map>
 #include <set>
 #include <algorithm>
+
+#ifdef MEMGLASS_WEB_ENABLED
+#include <httplib.h>
+#include <atomic>
+#include <cmath>
+#endif
 
 static volatile bool g_running = true;
 
@@ -463,20 +472,675 @@ private:
     bool show_help_ = false;
 };
 
+// ============================================================================
+// Web Server Mode
+// ============================================================================
+
+#ifdef MEMGLASS_WEB_ENABLED
+
+// JSON escaping helper
+std::string json_escape(const std::string& s) {
+    std::string result;
+    result.reserve(s.size() + 10);
+    for (char c : s) {
+        switch (c) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default: result += c; break;
+        }
+    }
+    return result;
+}
+
+// Format field value as JSON-compatible string
+std::string format_value_json(const memglass::FieldProxy& field) {
+    auto* info = field.info();
+    if (!info) return "null";
+
+    switch (static_cast<memglass::PrimitiveType>(info->type_id)) {
+        case memglass::PrimitiveType::Bool:
+            return field.as<bool>() ? "true" : "false";
+        case memglass::PrimitiveType::Int8:
+            return std::to_string(static_cast<int>(field.as<int8_t>()));
+        case memglass::PrimitiveType::UInt8:
+            return std::to_string(static_cast<unsigned>(field.as<uint8_t>()));
+        case memglass::PrimitiveType::Int16:
+            return std::to_string(field.as<int16_t>());
+        case memglass::PrimitiveType::UInt16:
+            return std::to_string(field.as<uint16_t>());
+        case memglass::PrimitiveType::Int32:
+            return std::to_string(field.as<int32_t>());
+        case memglass::PrimitiveType::UInt32:
+            return std::to_string(field.as<uint32_t>());
+        case memglass::PrimitiveType::Int64:
+            return std::to_string(field.as<int64_t>());
+        case memglass::PrimitiveType::UInt64:
+            return std::to_string(field.as<uint64_t>());
+        case memglass::PrimitiveType::Float32: {
+            float v = field.as<float>();
+            if (std::isnan(v)) return "\"NaN\"";
+            if (std::isinf(v)) return v > 0 ? "\"Infinity\"" : "\"-Infinity\"";
+            return fmt::format("{:.6g}", v);
+        }
+        case memglass::PrimitiveType::Float64: {
+            double v = field.as<double>();
+            if (std::isnan(v)) return "\"NaN\"";
+            if (std::isinf(v)) return v > 0 ? "\"Infinity\"" : "\"-Infinity\"";
+            return fmt::format("{:.6g}", v);
+        }
+        case memglass::PrimitiveType::Char:
+            return fmt::format("\"{}\"", field.as<char>());
+        default:
+            return "null";
+    }
+}
+
+std::string atomicity_json(memglass::Atomicity a) {
+    switch (a) {
+        case memglass::Atomicity::Atomic: return "\"atomic\"";
+        case memglass::Atomicity::Seqlock: return "\"seqlock\"";
+        case memglass::Atomicity::Locked: return "\"locked\"";
+        default: return "\"none\"";
+    }
+}
+
+// Embedded HTML/JS for the web UI
+const char* WEB_UI_HTML = R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memglass Browser</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+            background: #1a1a2e;
+            color: #eee;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border: 1px solid #0f3460;
+        }
+        .header h1 {
+            color: #00d9ff;
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        .header .info {
+            color: #888;
+            font-size: 14px;
+        }
+        .header .info span {
+            color: #00d9ff;
+            margin-right: 20px;
+        }
+        .controls {
+            margin: 15px 0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .controls button {
+            background: #0f3460;
+            color: #00d9ff;
+            border: 1px solid #00d9ff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+        .controls button:hover {
+            background: #00d9ff;
+            color: #1a1a2e;
+        }
+        .controls label {
+            color: #888;
+            font-size: 14px;
+        }
+        .controls input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        .tree {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 15px;
+            border: 1px solid #0f3460;
+        }
+        .object {
+            margin-bottom: 5px;
+        }
+        .object-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: #0f3460;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .object-header:hover {
+            background: #1a4a7a;
+        }
+        .toggle {
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 10px;
+            color: #00d9ff;
+            font-weight: bold;
+        }
+        .object-label {
+            color: #ffd700;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .object-type {
+            color: #00d9ff;
+            font-size: 13px;
+        }
+        .fields {
+            margin-left: 30px;
+            padding-left: 15px;
+            border-left: 2px solid #0f3460;
+        }
+        .field-group-header {
+            display: flex;
+            align-items: center;
+            padding: 6px 10px;
+            margin: 3px 0;
+            background: #1a2a4a;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .field-group-header:hover {
+            background: #1a3a5a;
+        }
+        .field-group-name {
+            color: #4ade80;
+            font-weight: bold;
+        }
+        .field {
+            display: flex;
+            align-items: center;
+            padding: 5px 10px;
+            margin: 2px 0;
+            border-radius: 4px;
+        }
+        .field:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        .field-name {
+            color: #aaa;
+            width: 180px;
+            flex-shrink: 0;
+        }
+        .field-value {
+            color: #fff;
+            font-weight: bold;
+            min-width: 120px;
+            text-align: right;
+            margin-right: 10px;
+        }
+        .field-value.changed {
+            animation: flash 0.3s ease-out;
+        }
+        @keyframes flash {
+            0% { background: #ffd700; color: #000; }
+            100% { background: transparent; color: #fff; }
+        }
+        .atomicity {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 5px;
+        }
+        .atomicity.atomic { background: #7c3aed; color: #fff; }
+        .atomicity.seqlock { background: #0891b2; color: #fff; }
+        .atomicity.locked { background: #dc2626; color: #fff; }
+        .status-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #16213e;
+            padding: 10px 20px;
+            border-top: 1px solid #0f3460;
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #888;
+        }
+        .status-bar .live {
+            color: #4ade80;
+        }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Memglass Browser</h1>
+        <div class="info">
+            <span>PID: <b id="pid">-</b></span>
+            <span>Objects: <b id="obj-count">-</b></span>
+            <span>Sequence: <b id="sequence">-</b></span>
+        </div>
+        <div class="controls">
+            <button onclick="refresh()">Refresh</button>
+            <button onclick="expandAll()">Expand All</button>
+            <button onclick="collapseAll()">Collapse All</button>
+            <label>
+                <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                Auto-refresh (500ms)
+            </label>
+        </div>
+    </div>
+    <div class="tree" id="tree"></div>
+    <div class="status-bar">
+        <span>Last update: <span id="last-update">-</span></span>
+        <span id="status" class="live">● Live</span>
+    </div>
+
+    <script>
+        let data = { objects: [], types: [], pid: 0, sequence: 0 };
+        let expanded = new Set();
+        let expandedGroups = new Set();
+        let previousValues = {};
+        let autoRefreshEnabled = true;
+        let refreshInterval = null;
+
+        async function fetchData() {
+            try {
+                const resp = await fetch('/api/data');
+                data = await resp.json();
+                document.getElementById('pid').textContent = data.pid;
+                document.getElementById('obj-count').textContent = data.objects.length;
+                document.getElementById('sequence').textContent = data.sequence;
+                document.getElementById('status').className = 'live';
+                document.getElementById('status').textContent = '● Live';
+            } catch (e) {
+                document.getElementById('status').className = '';
+                document.getElementById('status').textContent = '● Disconnected';
+            }
+        }
+
+        function getFieldGroups(fields) {
+            const groups = {};
+            for (const field of fields) {
+                const dotIdx = field.name.indexOf('.');
+                if (dotIdx !== -1) {
+                    const groupName = field.name.substring(0, dotIdx);
+                    const fieldName = field.name.substring(dotIdx + 1);
+                    if (!groups[groupName]) groups[groupName] = [];
+                    groups[groupName].push({ ...field, displayName: fieldName });
+                } else {
+                    if (!groups['']) groups[''] = [];
+                    groups[''].push({ ...field, displayName: field.name });
+                }
+            }
+            return groups;
+        }
+
+        function render() {
+            const tree = document.getElementById('tree');
+            let html = '';
+
+            for (let i = 0; i < data.objects.length; i++) {
+                const obj = data.objects[i];
+                const isExpanded = expanded.has(i);
+                const type = data.types.find(t => t.name === obj.type_name);
+
+                html += `<div class="object">`;
+                html += `<div class="object-header" onclick="toggle(${i})">`;
+                html += `<span class="toggle">${isExpanded ? '−' : '+'}</span>`;
+                html += `<span class="object-label">${escapeHtml(obj.label)}</span>`;
+                html += `<span class="object-type">(${escapeHtml(obj.type_name)})</span>`;
+                html += `</div>`;
+
+                if (isExpanded && type) {
+                    html += `<div class="fields">`;
+                    const groups = getFieldGroups(obj.fields || []);
+                    const sortedGroupNames = Object.keys(groups).sort();
+
+                    for (const groupName of sortedGroupNames) {
+                        const fields = groups[groupName];
+                        if (groupName === '') {
+                            for (const field of fields) {
+                                html += renderField(obj.label, field);
+                            }
+                        } else {
+                            const groupKey = `${i}:${groupName}`;
+                            const isGroupExpanded = expandedGroups.has(groupKey);
+                            html += `<div class="field-group-header" onclick="toggleGroup('${groupKey}')">`;
+                            html += `<span class="toggle">${isGroupExpanded ? '−' : '+'}</span>`;
+                            html += `<span class="field-group-name">${escapeHtml(groupName)}</span>`;
+                            html += `</div>`;
+                            if (isGroupExpanded) {
+                                html += `<div class="fields">`;
+                                for (const field of fields) {
+                                    html += renderField(obj.label, field);
+                                }
+                                html += `</div>`;
+                            }
+                        }
+                    }
+                    html += `</div>`;
+                }
+                html += `</div>`;
+            }
+
+            tree.innerHTML = html;
+            document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        }
+
+        function renderField(objLabel, field) {
+            const key = `${objLabel}.${field.name}`;
+            const prevValue = previousValues[key];
+            const changed = prevValue !== undefined && prevValue !== field.value;
+            previousValues[key] = field.value;
+
+            let atomicityClass = '';
+            let atomicityLabel = '';
+            if (field.atomicity && field.atomicity !== 'none') {
+                atomicityClass = field.atomicity;
+                atomicityLabel = field.atomicity;
+            }
+
+            let html = `<div class="field">`;
+            html += `<span class="field-name">${escapeHtml(field.displayName || field.name)}</span>`;
+            html += `<span class="field-value${changed ? ' changed' : ''}">${formatValue(field.value)}</span>`;
+            if (atomicityLabel) {
+                html += `<span class="atomicity ${atomicityClass}">${atomicityLabel}</span>`;
+            }
+            html += `</div>`;
+            return html;
+        }
+
+        function formatValue(v) {
+            if (v === null || v === undefined) return '<null>';
+            if (typeof v === 'number') {
+                if (Number.isInteger(v)) return v.toLocaleString();
+                return v.toLocaleString(undefined, { maximumFractionDigits: 6 });
+            }
+            return escapeHtml(String(v));
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function toggle(idx) {
+            if (expanded.has(idx)) expanded.delete(idx);
+            else expanded.add(idx);
+            render();
+        }
+
+        function toggleGroup(key) {
+            if (expandedGroups.has(key)) expandedGroups.delete(key);
+            else expandedGroups.add(key);
+            render();
+        }
+
+        function expandAll() {
+            for (let i = 0; i < data.objects.length; i++) {
+                expanded.add(i);
+                const type = data.types.find(t => t.name === data.objects[i].type_name);
+                if (type) {
+                    const groups = getFieldGroups(data.objects[i].fields || []);
+                    for (const groupName of Object.keys(groups)) {
+                        if (groupName) expandedGroups.add(`${i}:${groupName}`);
+                    }
+                }
+            }
+            render();
+        }
+
+        function collapseAll() {
+            expanded.clear();
+            expandedGroups.clear();
+            render();
+        }
+
+        async function refresh() {
+            await fetchData();
+            render();
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = document.getElementById('auto-refresh').checked;
+            if (autoRefreshEnabled) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            if (refreshInterval) return;
+            refreshInterval = setInterval(refresh, 500);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+        }
+
+        // Initial load
+        refresh().then(() => {
+            // Auto-expand first object if there's only one
+            if (data.objects.length === 1) {
+                expanded.add(0);
+                render();
+            }
+        });
+        startAutoRefresh();
+    </script>
+</body>
+</html>
+)html";
+
+class WebServer {
+public:
+    WebServer(memglass::Observer& obs, int port)
+        : obs_(obs), port_(port), running_(false) {}
+
+    void run() {
+        httplib::Server svr;
+
+        // Serve the main UI
+        svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(WEB_UI_HTML, "text/html");
+        });
+
+        // API endpoint: get all data
+        svr.Get("/api/data", [this](const httplib::Request&, httplib::Response& res) {
+            obs_.refresh();
+            std::string json = build_json();
+            res.set_content(json, "application/json");
+        });
+
+        running_ = true;
+        std::cerr << "Web server running at http://localhost:" << port_ << "\n";
+        std::cerr << "Press Ctrl+C to stop.\n";
+
+        // Run server in a way that can be interrupted
+        svr.listen("0.0.0.0", port_);
+    }
+
+private:
+    std::string build_json() {
+        std::ostringstream ss;
+        ss << "{";
+
+        // Producer info
+        ss << "\"pid\":" << obs_.producer_pid() << ",";
+        ss << "\"sequence\":" << obs_.sequence() << ",";
+
+        // Types
+        ss << "\"types\":[";
+        const auto& types = obs_.types();
+        for (size_t i = 0; i < types.size(); ++i) {
+            if (i > 0) ss << ",";
+            const auto& t = types[i];
+            ss << "{\"name\":\"" << json_escape(t.name) << "\""
+               << ",\"type_id\":" << t.type_id
+               << ",\"size\":" << t.size
+               << ",\"field_count\":" << t.fields.size()
+               << "}";
+        }
+        ss << "],";
+
+        // Objects with field values
+        ss << "\"objects\":[";
+        auto objects = obs_.objects();
+        for (size_t i = 0; i < objects.size(); ++i) {
+            if (i > 0) ss << ",";
+            const auto& obj = objects[i];
+            ss << "{\"label\":\"" << json_escape(obj.label) << "\""
+               << ",\"type_name\":\"" << json_escape(obj.type_name) << "\""
+               << ",\"type_id\":" << obj.type_id
+               << ",\"fields\":[";
+
+            // Get field values
+            auto view = obs_.get(obj);
+            const memglass::ObservedType* type_info = nullptr;
+            for (const auto& t : types) {
+                if (t.name == obj.type_name) {
+                    type_info = &t;
+                    break;
+                }
+            }
+
+            if (type_info && view) {
+                for (size_t j = 0; j < type_info->fields.size(); ++j) {
+                    if (j > 0) ss << ",";
+                    const auto& field = type_info->fields[j];
+                    auto fv = view[field.name];
+
+                    ss << "{\"name\":\"" << json_escape(field.name) << "\""
+                       << ",\"value\":" << (fv ? format_value_json(fv) : "null")
+                       << ",\"atomicity\":" << atomicity_json(field.atomicity)
+                       << "}";
+                }
+            }
+
+            ss << "]}";
+        }
+        ss << "]";
+
+        ss << "}";
+        return ss.str();
+    }
+
+    memglass::Observer& obs_;
+    int port_;
+    std::atomic<bool> running_;
+};
+
+#endif // MEMGLASS_WEB_ENABLED
+
+// ============================================================================
+// Command-line parsing
+// ============================================================================
+
+struct Options {
+    std::string session_name;
+    bool web_mode = false;
+    int web_port = 8080;
+    bool help = false;
+};
+
+void print_usage(const char* prog) {
+    std::cerr << "Usage: " << prog << " [OPTIONS] <session_name>\n"
+              << "\n"
+              << "Interactive observer for memglass sessions.\n"
+              << "\n"
+              << "Options:\n"
+              << "  -h, --help           Show this help message\n"
+#ifdef MEMGLASS_WEB_ENABLED
+              << "  -w, --web [PORT]     Run as web server (default port: 8080)\n"
+#endif
+              << "\n"
+              << "TUI Controls:\n"
+              << "  Up/Down, j/k         Navigate\n"
+              << "  Enter, Space         Expand/collapse\n"
+              << "  r                    Refresh objects\n"
+              << "  h, ?                 Toggle help\n"
+              << "  q                    Quit\n";
+}
+
+Options parse_args(int argc, char* argv[]) {
+    Options opts;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            opts.help = true;
+            return opts;
+        }
+#ifdef MEMGLASS_WEB_ENABLED
+        else if (arg == "-w" || arg == "--web") {
+            opts.web_mode = true;
+            // Check if next arg is a port number
+            if (i + 1 < argc) {
+                char* end;
+                long port = std::strtol(argv[i + 1], &end, 10);
+                if (*end == '\0' && port > 0 && port < 65536) {
+                    opts.web_port = static_cast<int>(port);
+                    ++i;
+                }
+            }
+        }
+#endif
+        else if (arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << "\n";
+            opts.help = true;
+            return opts;
+        }
+        else {
+            opts.session_name = arg;
+        }
+    }
+
+    return opts;
+}
+
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <session_name>\n";
+    Options opts = parse_args(argc, argv);
+
+    if (opts.help) {
+        print_usage(argv[0]);
         return 1;
     }
 
-    std::string session_name = argv[1];
+    if (opts.session_name.empty()) {
+        std::cerr << "Error: session name required\n\n";
+        print_usage(argv[0]);
+        return 1;
+    }
 
-    memglass::Observer obs(session_name);
+    memglass::Observer obs(opts.session_name);
 
-    std::cerr << "Connecting to session '" << session_name << "'...\n";
+    std::cerr << "Connecting to session '" << opts.session_name << "'...\n";
 
     if (!obs.connect()) {
         std::cerr << "Failed to connect. Is the producer running?\n";
@@ -484,10 +1148,19 @@ int main(int argc, char* argv[]) {
     }
 
     std::cerr << "Connected to PID: " << obs.producer_pid() << "\n";
-    std::cerr << "Starting browser...\n";
 
-    TreeBrowser browser(obs);
-    browser.run();
+#ifdef MEMGLASS_WEB_ENABLED
+    if (opts.web_mode) {
+        std::cerr << "Starting web server on port " << opts.web_port << "...\n";
+        WebServer server(obs, opts.web_port);
+        server.run();
+    } else
+#endif
+    {
+        std::cerr << "Starting TUI browser...\n";
+        TreeBrowser browser(obs);
+        browser.run();
+    }
 
     std::cout << "\nDisconnecting...\n";
     obs.disconnect();

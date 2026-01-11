@@ -3,7 +3,25 @@
 #include <cstdint>
 
 // Trading types for memglass example
-// These would normally be processed by memglass-gen
+//
+// ⚠️⚠️⚠️ WARNING: THESE TYPE DEFINITIONS ARE INCORRECT ⚠️⚠️⚠️
+//
+// This file demonstrates INCORRECT type definitions. The annotations
+// (@atomic, @seqlock, etc.) are metadata only - they tell observers
+// how to READ fields but do NOT provide synchronization.
+//
+// Problems with these definitions:
+// 1. Fields are plain types (int64_t) not wrappers (std::atomic<int64_t>)
+// 2. Producer writes directly to fields without synchronization
+// 3. Memory layout doesn't match what annotations suggest
+// 4. Will cause torn reads, cache issues, and undefined behavior
+//
+// For CORRECT type definitions with proper synchronization, see:
+// - trading_types_corrected.hpp
+// - README_SYNCHRONIZATION.md
+// - docs/MEMORY_MODEL.md
+//
+// ⚠️⚠️⚠️ DO NOT USE THIS PATTERN IN PRODUCTION CODE ⚠️⚠️⚠️
 
 struct [[memglass::observe]] Quote {
     int64_t bid_price;      // @seqlock - Price in ticks

@@ -1,4 +1,26 @@
 // Example producer - trading engine simulation
+//
+// ⚠️⚠️⚠️ WARNING: THIS EXAMPLE HAS SYNCHRONIZATION ISSUES ⚠️⚠️⚠️
+//
+// This code demonstrates INCORRECT usage of memglass. The structs use plain
+// types (int64_t, uint32_t) but the producer writes to them directly without
+// proper synchronization. This can cause:
+//
+// 1. Torn reads - observer sees inconsistent data
+// 2. Cache staleness - observer sees outdated values
+// 3. Undefined behavior - memory layout mismatch with observer expectations
+// 4. Platform-specific failures - especially on ARM/POWER architectures
+//
+// For CORRECT usage with proper synchronization, see:
+// - trading_producer_corrected.cpp
+// - trading_types_corrected.hpp
+// - README_SYNCHRONIZATION.md
+// - docs/MEMORY_MODEL.md
+//
+// This example is kept to show what NOT to do and for comparison purposes.
+//
+// ⚠️⚠️⚠️ DO NOT USE THIS PATTERN IN PRODUCTION CODE ⚠️⚠️⚠️
+
 #include <memglass/memglass.hpp>
 #include "trading_types.hpp"
 #include "trading_types_generated.hpp"

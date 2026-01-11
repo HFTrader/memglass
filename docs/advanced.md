@@ -1,5 +1,11 @@
 # Advanced Guide
 
+> **⚠️ IMPORTANT: Synchronization Requirements**
+>
+> For correct operation in multi-core/multi-process environments, you **must** use proper synchronization wrappers (`std::atomic<T>`, `Guarded<T>`, `Locked<T>`) for fields accessed concurrently. Comment annotations like `@atomic` and `@seqlock` are metadata only - they tell observers how to read, but do not provide synchronization themselves.
+>
+> **See [MEMORY_MODEL.md](MEMORY_MODEL.md) for complete details on memory ordering and synchronization requirements.**
+
 This guide covers advanced features of memglass including nested structs, synchronization primitives, field annotations, and the code generator.
 
 ## Table of Contents
@@ -113,42 +119,48 @@ memglass provides three levels of synchronization for field access, specified vi
 
 ### Atomic Fields
 
-For single primitive values that fit in a register:
+For single primitive values that fit in a register, use `std::atomic<T>`:
 
 ```cpp
 struct [[memglass::observe]] Stats {
-    uint64_t counter;        // @atomic
-    int64_t last_value;      // @atomic
+    std::atomic<uint64_t> counter;        // @atomic
+    std::atomic<int64_t> last_value;      // @atomic
 };
 ```
 
 **Producer usage:**
 ```cpp
-stats->counter++;  // Compiler generates atomic increment
+stats->counter.fetch_add(1, std::memory_order_relaxed);  // Atomic increment
+// or
+stats->last_value.store(42, std::memory_order_release);  // Atomic store
 ```
 
 **Observer usage:**
 ```cpp
-uint64_t c = view["counter"];  // Atomic load
+uint64_t c = view["counter"];  // Atomic load with acquire semantics
 ```
+
+**IMPORTANT:** The field must be declared as `std::atomic<T>` in the struct definition. 
+The `@atomic` annotation alone is insufficient - it only tells the observer how to read; 
+the producer must use `std::atomic<T>` to ensure proper synchronization.
 
 Supported atomic types: `bool`, `int8-64`, `uint8-64`, `float`, `double`
 
 ### Seqlock Fields (`Guarded<T>`)
 
-For compound types that must be read/written atomically as a unit:
+For compound types that must be read/written atomically as a unit, use `Guarded<T>`:
 
 ```cpp
 struct [[memglass::observe]] MarketData {
-    Quote best_quote;        // @seqlock
-    Quote last_trade;        // @seqlock
+    Guarded<Quote> best_quote;        // @seqlock
+    Guarded<Quote> last_trade;        // @seqlock
 };
 ```
 
 **How it works:**
 
 1. Writer increments sequence to odd (signals write in progress)
-2. Writer copies data
+2. Writer copies data with memory barriers
 3. Writer increments sequence to even (signals write complete)
 4. Reader checks sequence before and after read; retries if changed
 
@@ -170,13 +182,19 @@ if (maybe_quote) {
 }
 ```
 
+**IMPORTANT:** The field must be declared as `Guarded<T>` in the struct definition.
+The `@seqlock` annotation alone is insufficient - it only tells the observer how to read;
+the producer must use `Guarded<T>` to ensure proper synchronization and prevent torn reads.
+
+**Memory overhead:** Each `Guarded<T>` field adds 8 bytes for the sequence counter.
+
 ### Locked Fields (`Locked<T>`)
 
-For operations requiring mutual exclusion:
+For operations requiring mutual exclusion, use `Locked<T>`:
 
 ```cpp
 struct [[memglass::observe]] Status {
-    char error_msg[256];     // @locked
+    Locked<char[256]> error_msg;     // @locked
 };
 ```
 
@@ -189,6 +207,12 @@ status->error_msg.update([](char* buf) {
     std::strcat(buf, " (retrying)");
 });
 ```
+
+**IMPORTANT:** The field must be declared as `Locked<T>` in the struct definition.
+The `@locked` annotation alone is insufficient - it only tells the observer how to read;
+the producer must use `Locked<T>` to ensure proper synchronization.
+
+**Memory overhead:** Each `Locked<T>` field adds 1 byte for the spinlock.
 
 ### Performance Characteristics
 
@@ -209,18 +233,26 @@ status->error_msg.update([](char* buf) {
 
 ## Field Annotations
 
+> **⚠️ CRITICAL:** Annotations are **metadata only** - they tell observers how to read fields but do not provide synchronization. The producer must use matching wrapper types (`std::atomic<T>`, `Guarded<T>`, `Locked<T>`) for proper synchronization. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
+
 Field annotations are specified in comments and parsed by memglass-gen.
 
 ### Synchronization Annotations
 
 ```cpp
 struct Data {
-    int64_t counter;      // @atomic
-    Quote quote;          // @seqlock
-    char message[256];    // @locked
-    int32_t debug_value;  // (no annotation - direct access)
+    std::atomic<int64_t> counter;  // @atomic - matches std::atomic wrapper
+    Guarded<Quote> quote;          // @seqlock - matches Guarded wrapper
+    Locked<char[256]> message;     // @locked - matches Locked wrapper
+    int32_t debug_value;           // (no annotation - plain access, no sync)
 };
 ```
+
+**Annotation-to-Type Mapping:**
+- `@atomic` → Field type must be `std::atomic<T>`
+- `@seqlock` → Field type must be `Guarded<T>`
+- `@locked` → Field type must be `Locked<T>`
+- (no annotation) → Plain type `T` (no synchronization)
 
 ### Future Annotations (Planned)
 

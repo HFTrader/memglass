@@ -195,14 +195,22 @@ int main() {
 
 ## Field Annotations
 
+> **⚠️ IMPORTANT:** For proper synchronization, use wrapper types in your struct definitions:
+> - `std::atomic<T>` for `@atomic` fields
+> - `Guarded<T>` for `@seqlock` fields  
+> - `Locked<T>` for `@locked` fields
+>
+> Comment annotations are metadata for observers - they don't provide synchronization.
+> **See [docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md) for details.**
+
 Use comments to specify synchronization:
 
 ```cpp
 struct Data {
-    int64_t counter;      // @atomic - std::atomic reads/writes
-    double price;         // @seqlock - seqlock protection for larger types
-    int32_t flags;        // @locked - mutex protection (rare)
-    int32_t simple;       // (no annotation) - direct read/write
+    std::atomic<int64_t> counter;  // @atomic - std::atomic reads/writes
+    Guarded<double> price;         // @seqlock - seqlock protection for consistency
+    Locked<int32_t> flags;         // @locked - mutex protection (rare)
+    int32_t simple;                // (no annotation) - direct read/write, may tear
 };
 ```
 
@@ -216,6 +224,7 @@ struct Data {
 ## Documentation
 
 - [Quick Start Guide](docs/quickstart.md) - Get up and running in 5 minutes
+- [**Memory Model & Synchronization**](docs/MEMORY_MODEL.md) - **Required reading for production use**
 - [Advanced Guide](docs/advanced.md) - Nested structs, synchronization, annotations
 - [Architecture](docs/architecture.md) - Internal design and memory layout
 - [API Reference](docs/api-reference.md) - Complete API documentation (includes Web API)

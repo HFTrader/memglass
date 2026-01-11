@@ -135,7 +135,7 @@ uint64_t v = observer["value"];  // Uses atomic load
 **Memory ordering:**
 - `memory_order_relaxed`: No ordering guarantees, fastest
 - `memory_order_release` (write) + `memory_order_acquire` (read): Ensures writes before store are visible after load
-- `memory_order_seq_cst`: Full sequentialconsistency (slowest, usually overkill)
+- `memory_order_seq_cst`: Full sequential consistency (slowest, usually overkill)
 
 **Guidelines:**
 - Use `relaxed` for independent counters
